@@ -4,7 +4,64 @@ Registro de progreso diario del desarrollo del ECS de arquetipos con job system 
 
 ---
 
-## 2026-10-25
+## 2026-10-25 (#15)
+
+**Fase:** Fase 2 - ECS de arquetipos (implementación)
+
+**Tiempo invertido:** 4h
+
+### Qué he hecho hoy
+- `swelter.hpp` dividido en headers dentro de `code/ecs/include/swelter/` (`config`, `entity`, `registry`, `chunk`, `archetype`, `entity_table`). `swelter.hpp` queda como header paraguas, así que el include para usar el ECS no cambia. Cada header compila solo.
+- Aserciones en el constructor del arquetipo: los IDs tienen que estar ordenados y sin repetir (`getColumn<T>` usa `lower_bound`).
+- Comentarios Doxygen en todos los headers (en inglés), con `@pre` que corresponden a las aserciones de debug.
+- Implementada la #15 (tabla de entidades paginada, D-11):
+  - `Entity` de 64 bits: 32 de índice y 32 de generación. Una `Entity` construida por defecto es `NULL_ENTITY` (`{UINT32_MAX, UINT32_MAX}`).
+  - `EntityRecord` de 16 B `{generación, ArchetypeId, RowLocation}` y `EntityLocation` `{ArchetypeId, RowLocation}`.
+  - `EntityTable` paginada: páginas de `ENTITY_PAGE_SIZE` (1024) registros reservadas según hacen falta; el registro se encuentra con desplazamiento y máscara, sin divisiones.
+  - `reserve()`: reutiliza el último índice liberado (LIFO) o da uno nuevo, y lanza `std::length_error` si se acaban los índices.
+  - `release()`: sube la generación, mete el índice en la lista libre y lo retira para siempre si la generación llega al máximo.
+  - `isAlive`, `place`, `location` e `isPlaced`. `debugSetGeneration` solo en debug, para las pruebas.
+- Limpieza de `removeRow`: comprueba si la fila es la última comparando índices en vez de punteros, copia la entidad con `getEntities` (sin `reinterpret_cast`) y sin el `emplace()` que sobraba.
+- Pruebas en el sandbox: reutilización LIFO con uno y dos índices, generaciones, entidad nula, índices que cruzan páginas, una lista libre de 1025 enlaces, `isAlive` con copias antiguas del mismo índice, `place`/`location`/`isPlaced`, retirada de índices e integración con un arquetipo (crear 3 chunks de entidades, destruir una de cada tres y comprobar que la tabla apunta a la fila real de cada entidad viva). Comprobado que la prueba de integración falla si no se actualiza la entidad movida.
+
+### Decisiones de diseño
+- Headers separados en una subcarpeta `swelter/` y un header paraguas en la raíz, como `entt/entt.hpp`.
+- `Entity` como dos campos de 32 bits en vez de un `uint64_t` con máscaras: mismo tamaño y más legible.
+- Valor por defecto de `Entity` = la nula, para que `Entity{}` no sea un ID válido (`{0, 0}` es la primera entidad).
+- La tabla es una instancia (cada mundo tiene la suya) y no estática como el pool: las pruebas son independientes y no hay estado global.
+- Lista libre implícita: un registro libre guarda en `location.row` el índice del siguiente libre, sin memoria extra.
+- `ensurePage` crea todas las páginas que falten (`while`) y no solo una, para que siga funcionando si algún día se reservan índices no consecutivos (reserva por lotes en la fase 3, cargar partidas).
+- La generación sube siempre al liberar; la retirada se decide con la generación nueva. Así ninguna entidad viva tiene generación `UINT32_MAX` y nunca coincide con la nula.
+- "Viva" (el ID es válido) y "colocada" (tiene fila) son preguntas distintas: una entidad reservada está viva pero no colocada.
+- La tabla solo gestiona IDs y ubicaciones; quitar filas del arquetipo lo hará el mundo.
+- Las referencias a `decisions.md` y a las fases no van en los comentarios del código: son documentación del TFG, no de la librería.
+
+### Problemas / bloqueos
+- Me costó entender la lista libre implícita: que `free_head` y el "siguiente" sean índices `uint32` dentro de los propios registros, y que `release` escribe el enlace y `reserve` lo lee.
+- Primera versión de `reserve()`: devolvía `void`, no avanzaba la cabeza de la lista libre, incrementaba `next_index` dos veces (escribía un registro y devolvía otro) y no inicializaba la generación del registro.
+- `ENTITY_PAGE_SIZE % 2 == 0` solo comprueba que es par; cambiado a `std::has_single_bit`.
+- `ensurePage` era `noexcept` pero puede lanzar `std::bad_alloc`.
+- La primera versión de `release()` comprobaba la retirada con la generación vieja: un índice llegaba a la generación máxima y, al liberarlo otra vez, no hacía nada y la entidad seguía viva.
+- Al pasar `removeRow` a índices comparé `row` con `last_chunk` en vez de con la última fila; lo detectó la prueba de borrar la única fila del último chunk.
+
+### Aprendizajes
+- Una lista enlazada no necesita punteros ni nodos aparte: los enlaces pueden ser índices guardados en los huecos libres de la propia estructura.
+- La generación resuelve los handles colgantes sin avisar a las copias: basta con cambiar la tabla para que las copias antiguas dejen de coincidir.
+- Si una excepción sale de una función `noexcept` el programa termina (`std::terminate`); hay que revisar qué puede lanzar antes de marcarla.
+- El orden importa para dejar el objeto consistente si algo lanza: reservar la página antes de incrementar `next_index`.
+- Comparar índices en vez de direcciones dice lo que se quiere preguntar y evita razonar sobre punteros a columnas o chunks distintos.
+- Una llamada con efectos dentro de una aserción desaparece en release.
+- Para comprobar que una prueba sirve, hay que romper el código a propósito y ver que falla.
+
+### Próximos pasos
+- PR de la #15.
+- Decidir si `typeId` del registro deja de ser `noexcept` (hoy, superar `MAX_COMPONENTS` termina el programa en vez de lanzar).
+- Añadir a D-05 las alternativas descartadas (alineación a 4 KB, reserva por lotes y pool por arquetipo).
+- Siguiente issue de la fase 2.
+
+---
+
+## 2026-10-25 (#14)
 
 **Fase:** Fase 2 - ECS de arquetipos (implementación)
 
