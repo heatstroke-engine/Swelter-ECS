@@ -348,7 +348,7 @@ namespace Swelter
                     if (cmp_info.size == 0) continue;
 
                     void* to = reinterpret_cast<std::byte*>(getColumn(chunk_i, i)) + row * cmp_info.size;
-                    void* from = reinterpret_cast<std::byte*>(getColumn(chunks.size() - 1, i)) + last_count * cmp_info.size;
+                    void* from = reinterpret_cast<std::byte*>(getColumn(last_chunk, i)) + last_count * cmp_info.size;
                     const std::uint32_t cmp_size = cmp_info.size;
 
                     if(!cmp_info.trivially_copyable)
