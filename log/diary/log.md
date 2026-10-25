@@ -4,6 +4,54 @@ Registro de progreso diario del desarrollo del ECS de arquetipos con job system 
 
 ---
 
+## 2026-10-25
+
+**Fase:** Fase 2 - ECS de arquetipos (implementación)
+
+**Tiempo invertido:** 6h
+
+### Qué he hecho hoy
+- Implementada la #14 (arquetipo con layout SoA) en `swelter.hpp`:
+  - `computeLayout`: a partir de la lista ordenada de IDs calcula la capacidad del chunk y el desplazamiento de cada columna (`ArchetypeLayout`). La columna de entidades va primero, cada columna empieza alineada a 64 B y la capacidad se reduce hasta que el relleno de alineación cabe en el chunk.
+  - `Archetype`: se construye a partir de la lista ordenada de IDs y calcula en el constructor el layout, el bitset y una copia de los `ComponentInfo` de sus componentes, todo `const`. Los descriptores de chunk (`Chunk*` y número de filas) son privados y se leen con `getChunks()`.
+  - `addRow`: añade la entidad al final del último chunk, pidiendo un chunk al pool solo cuando no hay ninguno o el último está lleno, y devuelve su ubicación (chunk y fila).
+  - `getColumn` (por posición y con plantilla) y `getEntities` (un `std::span` con las entidades del chunk).
+  - `removeRow` con la política b: destruye los componentes de la fila, mueve la última fila del último chunk al hueco (`memcpy` para triviales, `move_construct` y `destroy` para el resto), devuelve el chunk al pool si se vacía y devuelve la entidad movida (`std::optional<Entity>`).
+  - Destructor: destruye los componentes no triviales de todas las filas vivas y devuelve todos los chunks al pool.
+- Límite de `MAX_COMPONENTS` (256) en el registro, que lanza `std::length_error` si se supera. `runTimeAssertion` devuelve `bool` y sigue evaluando la expresión en release.
+- `Entity` provisional de 64 bits hasta la #15.
+- Pruebas en el sandbox: layout del ejemplo calculado a mano (816 filas, columnas en 6528 y 13056), llenar y desbordar chunks, columna de entidades, columnas alineadas, escritura y lectura, los cuatro casos de `removeRow` con un `std::string` y un componente con contador de instancias que comprueba que `removeRow` no pierde ni duplica objetos y que el destructor los destruye todos y devuelve los chunks al pool.
+
+### Decisiones de diseño
+- Mínimo de 16 filas por chunk (`MIN_CHUNK_CAPACITY`): limita el espacio perdido al final del chunk a 1/16 (6,25 %) y una fila a ~1 KB.
+- Bitset de tamaño fijo (`std::bitset<MAX_COMPONENTS>`) por sencillez.
+- El arquetipo gestiona filas y memoria, no tipos: `addRow` deja los componentes sin construir y quien llama los construye en su sitio.
+- Descriptor por chunk (puntero y número de filas) en lugar de un total de entidades: deja sitio para metadatos por chunk (tags activables, `Changed<T>`) y para repartir trabajo por chunks en la fase 3.
+- Lo que no cambia (`ids`, `layout`, `bitset`, `cmps_info`) es público y `const`; lo que cambia (los chunks) es privado.
+- La ubicación de una entidad usa índice de chunk y no `Chunk*`: se puede validar, ocupa la mitad y es lo que guardará la tabla de entidades (D-11).
+- El arquetipo guarda sus propios `ComponentInfo` para no consultar el registro en cada operación (y no depender de su mutex en la fase 3).
+
+### Problemas / bloqueos
+- En `computeLayout`: el cursor avanzaba desde el valor sin alinear (las columnas se pisaban), se guardaba el final de cada columna en vez del inicio, la condición del bucle miraba el inicio de la última columna en vez del final y una variable declarada dentro del `do { }` no existe en su `while`.
+- `lower_bound` devuelve el primer elemento mayor o igual: sin comprobar la igualdad, `getColumn<T>` devolvía la columna de otro componente.
+- Al cambiar `memcpy` por `construct_at`, el `+ fila` quedó sobre el `std::byte*` y avanzaba bytes en vez de entidades.
+- La primera versión de `removeRow` trataba la fila como AoS (componentes a continuación de la entidad), tomaba como última fila una posición de más y decrementaba una copia del descriptor.
+- El primer destructor usaba el mismo índice para filas y componentes y se colgaba.
+
+### Aprendizajes
+- En SoA, el componente `k` de la fila `r` está en `data + offsets[k] + r * size_k`: cada columna se indexa con su propio tamaño desde el inicio del chunk.
+- Sumar a un puntero avanza elementos de su tipo; la aritmética en bytes se hace sobre `std::byte*`, no sobre `void*` (extensión de GCC).
+- `memcpy` y `std::construct_at` generan el mismo código para un tipo trivial; `memcpy` crea objetos implícitamente solo en tipos trivialmente copiables y su ventaja real es copiar bloques grandes.
+- `const std::span<T>` hace constante el span, no los elementos: lo que se quiere es `std::span<const T>`.
+- Los miembros se inicializan en el orden en que se declaran, no en el de la lista de inicialización.
+- Un componente con contador de instancias es la forma de comprobar que no se pierden ni se duplican objetos.
+
+### Próximos pasos
+- PR de la #14.
+- #15: tabla de entidades paginada (D-11).
+
+---
+
 ## 2026-10-24
 
 **Fase:** Fase 2 - ECS de arquetipos (implementación)

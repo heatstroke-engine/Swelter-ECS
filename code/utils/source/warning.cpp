@@ -13,7 +13,7 @@ namespace Bsp
         Log::printTrace(message, location);
     }
 
-    void runTimeAssertion_imp(bool b, const char* expr, std::string_view message, std::source_location location)
+    bool runTimeAssertion_imp(bool b, const char* expr, std::string_view message, std::source_location location)
     {
         if(!b)
         {
@@ -21,5 +21,7 @@ namespace Bsp
             Log::printTrace(message, location);
             std::exit(1);
         }
+        return b;
     }
+
 }
