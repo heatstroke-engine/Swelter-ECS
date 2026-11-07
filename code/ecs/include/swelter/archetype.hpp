@@ -140,6 +140,13 @@ namespace Swelter
         std::uint32_t row         {0};  ///< Row inside that chunk.
     };
 
+
+    struct Edge
+    {
+        CmpRegistry::CmpId_t id;
+        ArchetypeId_t target;
+    };
+
     /**
      * @brief Storage of all the entities that have exactly the same set of components.
      *
@@ -181,6 +188,26 @@ namespace Swelter
             debugAssertion(std::ranges::is_sorted(ids), "Archetype ids must be sorted");
             debugAssertion(std::ranges::adjacent_find(ids) == ids.end(), "Archetype ids must not be repeated");
         }
+
+        /**
+         * @brief Creates an empty archetype (without chunks) for a set of components.
+         * @param ids0 Component IDs, already registered.
+         * @param bitset0 Already computed bitset.
+         * @pre @p ids0 is sorted and has no repeated IDs. @p bitset0 is the correct bitset representation of ids0.
+         */
+        explicit Archetype(const std::vector<CmpRegistry::CmpId_t>& ids0, const std::bitset<MAX_COMPONENTS>& bitset0) :
+            ids(ids0),
+            cmps_info(buildComponentInfo(ids0)),
+            layout(computeLayout(cmps_info)),
+            bitset(bitset0),
+            chunks()
+        {
+            // The archetype identity is the sorted list of ids: getColumn<T> relies on it (lower_bound)
+            debugAssertion(std::ranges::is_sorted(ids), "Archetype ids must be sorted");
+            debugAssertion(std::ranges::adjacent_find(ids) == ids.end(), "Archetype ids must not be repeated");
+            debugAssertion(bitset0 == buildBitSet(ids0), "Wrong compute bitset");
+        }
+
 
         /**
          * @brief Destroys the components of every row and returns all the chunks to the pool.
@@ -259,6 +286,20 @@ namespace Swelter
         }
 
         /**
+         * @brief Type-erased pointer to the start of a component column.
+         * @param chunk_i Index of the chunk.
+         * @param cmp_i Index of the component in #ids (not its ID).
+         * @return Pointer to the first element of the column.
+         * @pre `chunk_i < getChunks().size()` and `cmp_i < ids.size()`.
+         */
+        const void* getColumn(const std::size_t chunk_i, const std::size_t cmp_i) const noexcept
+        {
+            debugAssertion(chunk_i < chunks.size() && cmp_i < layout.offsets.size());
+
+            return chunks[chunk_i].chunk->data + layout.offsets[cmp_i];
+        }
+
+        /**
          * @brief Typed pointer to the start of the column of component @p T.
          *
          * Finds the column with a binary search over #ids.
@@ -269,6 +310,26 @@ namespace Swelter
          */
         template<typename T>
         T* getColumn(const std::size_t chunk_i) noexcept
+        {
+            auto it = std::ranges::lower_bound(ids, CmpRegistry::id<T>());
+            debugAssertion(it != ids.end());
+            debugAssertion(*it == CmpRegistry::id<T>());
+            std::size_t cmp_i = std::distance(ids.begin(),it);
+
+            return static_cast<T*>(getColumn(chunk_i, cmp_i));
+        }
+
+        /**
+         * @brief Typed const pointer to the start of the column of component @p T.
+         *
+         * Finds the column with a binary search over #ids.
+         * @tparam T Component type.
+         * @param chunk_i Index of the chunk.
+         * @return Const pointer to the first @p T of the column. Only the first `getChunks()[chunk_i].count` elements are valid.
+         * @pre The archetype has component @p T and `chunk_i < getChunks().size()`.
+         */
+        template<typename T>
+        const T* getColumn(const std::size_t chunk_i) const noexcept
         {
             auto it = std::ranges::lower_bound(ids, CmpRegistry::id<T>());
             debugAssertion(it != ids.end());
@@ -329,6 +390,28 @@ namespace Swelter
                     cmp_info.destroy(cmp_start);
                 }
             }
+
+            return fillHole(chunk_i, row);
+        }
+
+        
+        /**
+         * @brief Fills the hole, destroying previus last position.
+         *
+         * Deletion policy b: if the row is not the last one, the last row of the last
+         * chunk is moved into the hole. If the last chunk becomes empty, it goes back to the pool.
+         * @param chunk_i Index of the chunk.
+         * @param row Row inside that chunk.
+         * @return The entity that was moved into the hole, if any. Its location must be
+         *         updated to `{chunk_i, row}` by the caller.
+         * @pre `chunk_i < getChunks().size()` and `row < getChunks()[chunk_i].count`.
+         */
+        std::optional<Entity> fillHole(const std::size_t chunk_i, const std::size_t row)
+        {
+            debugAssertion(chunk_i < chunks.size() && row < chunks[chunk_i].count);
+
+            std::optional<Entity> moved_e;
+
             ChunkDescriptor& last_descriptor = chunks.back();
             std::uint32_t last_count = last_descriptor.count - 1;
 
@@ -355,7 +438,7 @@ namespace Swelter
                     {
                         cmp_info.move_construct(to, from);
                         // Still need to destroy nontrivials
-                        cmp_info.destroy(from);
+                        cmp_info.destroy(from); 
                     }
                     else
                     {
@@ -370,6 +453,7 @@ namespace Swelter
             }
             return moved_e;
         }
+        
         // Deleted functions
         Archetype(const Archetype&) = delete;
         Archetype(Archetype&&) = delete;
@@ -380,6 +464,8 @@ namespace Swelter
         const std::vector<ComponentInfo> cmps_info;     ///< Information of each component, in the same order as #ids.
         const ArchetypeLayout layout;                   ///< Capacity and column offsets of every chunk.
         const std::bitset<MAX_COMPONENTS> bitset;       ///< Same components as #ids, used to match queries with `(arch & query) == query`.
+        std::vector<Edge> add_edges;
+        std::vector<Edge> remove_edges;
         private:
             std::vector<ChunkDescriptor> chunks;        ///< Chunks in use. All are full except the last one.
     };

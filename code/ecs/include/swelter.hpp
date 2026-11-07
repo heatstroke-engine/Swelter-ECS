@@ -14,3 +14,4 @@
 #include <swelter/chunk.hpp>
 #include <swelter/archetype.hpp>
 #include <swelter/entity_table.hpp>
+#include <swelter/world.hpp>

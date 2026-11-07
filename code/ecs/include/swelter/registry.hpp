@@ -171,7 +171,7 @@ namespace Swelter
                 }
                 else
                 {
-                    throw std::length_error{"Max component capacity exceed."};
+                    throw std::length_error{"Max component capacity exceeded."};
                 }
 
                 return static_cast<CmpId_t>(cmpinfo.size() - 1UL);

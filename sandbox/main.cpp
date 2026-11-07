@@ -54,10 +54,16 @@ std::string longName(std::size_t i)
     return "entity_with_a_long_name_" + std::to_string(i);
 }
 
-int main() {
+// is_unique: every pair of types is compared, not only the first one with the rest
+compileTimeAssertion(MP::is_unique_v<int>);
+compileTimeAssertion(MP::is_unique_v<int, float, double>);
+compileTimeAssertion(!MP::is_unique_v<int, int>);
+compileTimeAssertion(!MP::is_unique_v<int, float, float>);
+compileTimeAssertion(!MP::is_unique_v<int, float, int>);
 
-    logInit();
-
+// Chunk pool. Runs first: the counters assume a pool that has never been used
+void testChunkPool()
+{
     // LIFO reuse: a returned chunk is the next one handed out
     Swelter::Chunk* first = Swelter::ChunkPool::allocate();
     Swelter::ChunkPool::deallocate(first);
@@ -101,7 +107,12 @@ int main() {
     chunks[0] = Swelter::ChunkPool::allocate();
     debugAssertion(Swelter::ChunkPool::ownedCount() == 5);
     debugAssertion(Swelter::ChunkPool::freeCount() == 3);
+}
 
+// Layout, archetype rows and columns, removeRow and the archetype destructor.
+// Runs right after testChunkPool: it relies on the chunks that test left in the pool
+void testArchetype()
+{
     Swelter::CmpRegistry::registerComponents<Position,Health>();
     std::vector<Swelter::ComponentInfo> g; 
     g.push_back(Swelter::CmpRegistry::info<Position>()); 
@@ -262,8 +273,11 @@ int main() {
     }
     debugAssertion(Tracked::alive == 0);
     debugAssertion(Swelter::ChunkPool::freeCount() == free_before_dtor + dtor_chunks);
+}
 
-    // Entity table tests
+// Entity table: reserve, release, pages, free list, isAlive and place
+void testEntityTable()
+{
     Swelter::EntityTable table;
 
     [[maybe_unused]] Swelter::Entity e0 = table.reserve();
@@ -368,8 +382,11 @@ int main() {
     [[maybe_unused]] const Swelter::Entity reused_again = retire.reserve();
     debugAssertion(reused_again.index == not_retired.index && reused_again.generation == 1);
 #endif
+}
 
-    // Integration with an archetype: the table always points to the row that really holds each entity
+// Entity table + archetype by hand, without the world
+void testTableArchetypeIntegration()
+{
     {
         std::vector<Swelter::CmpRegistry::CmpId_t> it_ids = {Swelter::CmpRegistry::id<Position>(),
                                                              Swelter::CmpRegistry::id<Name>()};
@@ -437,6 +454,220 @@ int main() {
         debugAssertion(live == it_rows - destroyed);
         debugAssertion(rows == live);
     }
+}
+
+// World: archetype lookup and graph edges (needs the debug-only accessors)
+void testWorldGraph()
+{
+#ifdef HS_DEBUG_MODE
+    using Swelter::CmpRegistry;
+
+    Swelter::World w;
+    const Swelter::ArchetypeId_t root = 0;
+    const CmpRegistry::CmpId_t pos = CmpRegistry::id<Position>();
+    const CmpRegistry::CmpId_t hp  = CmpRegistry::id<Health>();
+    const CmpRegistry::CmpId_t tag = CmpRegistry::id<TPlayer>();
+
+    // A new world only has the root archetype: no components
+    debugAssertion(w.debugArchetypeCount() == 1);
+    debugAssertion(w.debugArchetype(root).ids.empty());
+
+    // Cold path: the same list gives the same archetype, a different one creates a new archetype
+    std::vector<CmpRegistry::CmpId_t> pos_hp_ids = {pos, hp};
+    std::ranges::sort(pos_hp_ids);
+    [[maybe_unused]] const Swelter::ArchetypeId_t pos_hp = w.debugFindOrCreateArchetype(pos_hp_ids);
+    debugAssertion(w.debugFindOrCreateArchetype(pos_hp_ids) == pos_hp);
+    debugAssertion(w.debugArchetypeCount() == 2);
+    debugAssertion(w.debugFindOrCreateArchetype({}) == root);
+
+    // root + Position: the first time creates the archetype and the edge
+    [[maybe_unused]] const Swelter::ArchetypeId_t only_pos = w.debugArchetypeWith(root, pos);
+    debugAssertion(w.debugArchetypeCount() == 3);
+    debugAssertion(w.debugArchetype(only_pos).ids == std::vector<CmpRegistry::CmpId_t>{pos});
+    debugAssertion(w.debugArchetype(root).add_edges.size() == 1);
+
+    // The second time follows the edge: no new archetype and no new edge
+    debugAssertion(w.debugArchetypeWith(root, pos) == only_pos);
+    debugAssertion(w.debugArchetypeCount() == 3);
+    debugAssertion(w.debugArchetype(root).add_edges.size() == 1);
+
+    // The inverse edge was stored too: removing Position goes back to the root without creating anything
+    debugAssertion(w.debugArchetype(only_pos).remove_edges.size() == 1);
+    debugAssertion(w.debugArchetypeWithout(only_pos, pos) == root);
+    debugAssertion(w.debugArchetypeCount() == 3);
+
+    // The order components are added in doesn't matter: {Position} + Health == {Health} + Position
+    debugAssertion(w.debugArchetypeWith(only_pos, hp) == pos_hp);
+    debugAssertion(w.debugArchetypeCount() == 3);                              // pos_hp already existed
+    [[maybe_unused]] const Swelter::ArchetypeId_t only_hp = w.debugArchetypeWith(root, hp);
+    debugAssertion(w.debugArchetypeCount() == 4);
+    debugAssertion(w.debugArchetypeWith(only_hp, pos) == pos_hp);
+    debugAssertion(w.debugArchetypeCount() == 4);
+
+    // Removing walks back through the inverse edges created above
+    debugAssertion(w.debugArchetypeWithout(pos_hp, hp) == only_pos);
+    debugAssertion(w.debugArchetypeWithout(pos_hp, pos) == only_hp);
+    debugAssertion(w.debugArchetypeCount() == 4);
+
+    // Adding a component it already has, or removing one it doesn't have: same archetype, no edges stored
+    [[maybe_unused]] const std::size_t pos_hp_add_edges = w.debugArchetype(pos_hp).add_edges.size();
+    debugAssertion(w.debugArchetypeWith(pos_hp, pos) == pos_hp);
+    debugAssertion(w.debugArchetype(pos_hp).add_edges.size() == pos_hp_add_edges);
+    [[maybe_unused]] const std::size_t root_remove_edges = w.debugArchetype(root).remove_edges.size();
+    debugAssertion(w.debugArchetypeWithout(root, pos) == root);
+    debugAssertion(w.debugArchetype(root).remove_edges.size() == root_remove_edges);
+
+    // A tag is part of the identity: {Position} and {Position, TPlayer} are different archetypes
+    [[maybe_unused]] const Swelter::ArchetypeId_t pos_tag = w.debugArchetypeWith(only_pos, tag);
+    debugAssertion(pos_tag != only_pos);
+    debugAssertion(w.debugArchetype(pos_tag).bitset.test(tag));
+    debugAssertion(w.debugArchetypeWithout(pos_tag, tag) == only_pos);
+#endif
+}
+
+// World: create, get and has
+void testWorldCreate()
+{
+    Swelter::World w;
+
+    // rvalues
+    [[maybe_unused]] const Swelter::Entity e = w.create(Position{1.f, 2.f}, Health{3.f});
+    debugAssertion(w.get<Position>(e).x == 1.f && w.get<Position>(e).y == 2.f);
+    debugAssertion(w.get<Health>(e).h == 3.f);
+    debugAssertion(w.has<Position>(e) && w.has<Health>(e));
+    debugAssertion(!w.has<Name>(e) && !w.has<TPlayer>(e));
+
+    // get returns a reference into the chunk: writing through it changes the stored value
+    w.get<Health>(e).h = 10.f;
+    debugAssertion(w.get<Health>(e).h == 10.f);
+
+    // const get
+    [[maybe_unused]] const Swelter::World& cw = w;
+    debugAssertion(cw.get<Position>(e).y == 2.f);
+
+    // lvalues and const lvalues are copied, the originals are untouched
+    Position p {5.f, 6.f};
+    const Health h {7.f};
+    [[maybe_unused]] const Swelter::Entity e_lvalue = w.create(p, h);
+    debugAssertion(w.get<Position>(e_lvalue).x == 5.f && w.get<Health>(e_lvalue).h == 7.f);
+    w.get<Position>(e_lvalue).x = -1.f;
+    debugAssertion(p.x == 5.f);
+
+    // Non trivial component
+    [[maybe_unused]] const Swelter::Entity e_name = w.create(Name{longName(1)});
+    debugAssertion(w.get<Name>(e_name).s == longName(1));
+
+    // Tags have no data, but has() sees them
+    [[maybe_unused]] const Swelter::Entity e_tag = w.create(Position{}, TPlayer{});
+    debugAssertion(w.has<TPlayer>(e_tag) && w.has<Position>(e_tag));
+
+    // No components: the entity lives in the root archetype
+    [[maybe_unused]] const Swelter::Entity e_empty = w.create();
+    debugAssertion(!w.has<Position>(e_empty));
+
+    // Different entities get different ids
+    debugAssertion(e != e_lvalue && e_lvalue != e_name);
+
+#ifdef HS_DEBUG_MODE
+    // The order of the arguments doesn't matter: same archetype
+    [[maybe_unused]] const Swelter::Entity e_swapped = w.create(Health{1.f}, Position{2.f, 3.f});
+    debugAssertion(w.debugArchetypeOf(e_swapped) == w.debugArchetypeOf(e));
+    debugAssertion(w.debugArchetypeOf(e_lvalue) == w.debugArchetypeOf(e));
+    debugAssertion(w.get<Position>(e_swapped).y == 3.f);
+
+    debugAssertion(w.debugArchetypeOf(e_tag) != w.debugArchetypeOf(e));
+    debugAssertion(w.debugArchetypeOf(e_empty) == 0);
+#endif
+}
+
+// World: destroy
+void testWorldDestroy()
+{
+    [[maybe_unused]] const int alive_before = Tracked::alive;
+    {
+        Swelter::World w;
+
+        // Only the components stored in the world count: the temporaries passed to create are already destroyed
+        std::vector<Swelter::Entity> es;
+        for(int i{}; i < 3; ++i)
+        {
+            es.push_back(w.create(Position{static_cast<float>(i), 0.f}, Tracked{i}));
+        }
+        debugAssertion(Tracked::alive == alive_before + 3);
+
+        debugAssertion(w.valid(es[0]) && w.valid(es[1]) && w.valid(es[2]));
+        debugAssertion(!w.valid(Swelter::NULL_ENTITY));
+
+        // Destroy the first one: the last row (es[2]) fills its hole and the table follows it
+        w.destroy(es[0]);
+        debugAssertion(!w.valid(es[0]));
+        debugAssertion(w.valid(es[1]) && w.valid(es[2]));
+        debugAssertion(Tracked::alive == alive_before + 2);
+        debugAssertion(w.get<Tracked>(es[2]).value == 2 && w.get<Position>(es[2]).x == 2.f);
+        debugAssertion(w.get<Tracked>(es[1]).value == 1 && w.get<Position>(es[1]).x == 1.f);
+
+        // Destroy the last row: nothing moves
+        w.destroy(es[2]);
+        debugAssertion(Tracked::alive == alive_before + 1);
+        debugAssertion(w.get<Tracked>(es[1]).value == 1);
+
+        // The released index is reused (LIFO) with the next generation
+        [[maybe_unused]] const Swelter::Entity reused = w.create(Position{}, Tracked{9});
+        debugAssertion(reused.index == es[2].index && reused.generation == es[2].generation + 1);
+        debugAssertion(w.valid(reused) && !w.valid(es[2]));     // same index, only the new handle is valid
+        debugAssertion(w.get<Tracked>(reused).value == 9);
+        debugAssertion(Tracked::alive == alive_before + 2);
+
+        // Entity without components (root archetype)
+        const Swelter::Entity empty = w.create();
+        debugAssertion(w.valid(empty));
+        w.destroy(empty);
+        debugAssertion(!w.valid(empty));
+    }
+    // The world destructor destroys the components still alive
+    debugAssertion(Tracked::alive == alive_before);
+
+    // Many entities over several chunks: every live entity keeps its own components
+    {
+        Swelter::World w;
+        std::vector<Swelter::Entity> es;
+        const std::size_t count = 3000;     // a few chunks of {Position, Name}
+        for(std::size_t i{}; i < count; ++i)
+        {
+            es.push_back(w.create(Position{static_cast<float>(i), 0.f}, Name{longName(i)}));
+        }
+
+        // Every third entity: holes in every chunk, filled with rows from the last one
+        std::vector<bool> alive(count, true);
+        for(std::size_t i{}; i < count; i += 3)
+        {
+            w.destroy(es[i]);
+            alive[i] = false;
+        }
+
+        for(std::size_t i{}; i < count; ++i)
+        {
+            debugAssertion(w.valid(es[i]) == alive[i]);
+            if(!alive[i]) continue;
+            debugAssertion(w.get<Position>(es[i]).x == static_cast<float>(i));
+            debugAssertion(w.get<Name>(es[i]).s == longName(i));
+        }
+    }
+
+    // Destroying a dead entity stops the program in debug (runTimeAssertion), so it is not tested here
+}
+
+int main() {
+
+    logInit();
+
+    testChunkPool();
+    testArchetype();
+    testEntityTable();
+    testTableArchetypeIntegration();
+    testWorldGraph();
+    testWorldCreate();
+    testWorldDestroy();
 
     return 0;
 }

@@ -42,6 +42,27 @@ namespace MP
     constexpr bool is_same_v = is_same<T,U>::value;
 
     /**
+     * @brief Holds a bool value that is true when T and U are the same type.
+     * @tparam T First type to compare.
+     * @tparam U Second type to compare.
+     */
+    template<typename... Ts>
+    struct is_unique : constant<bool, true>
+    {
+
+    };
+
+    /// @brief Specialization for T and U being the same type.
+    template<typename T, typename... Ts>
+    struct is_unique<T,Ts...> : constant<bool, ((true && ... && !is_same_v<T,Ts>) && (is_unique<Ts...>::value))>
+    {
+    };
+
+    /// @brief Shortcut to is_unique<T,U>::value.
+    template<typename... Ts>
+    constexpr bool is_unique_v = is_unique<Ts...>::value;
+
+    /**
      * @brief Identity trait: exposes T as the member type.
      * @tparam T Type to expose.
      */
