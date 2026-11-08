@@ -345,28 +345,3 @@ namespace Swelter
             std::unordered_map<std::bitset<MAX_COMPONENTS>, ArchetypeId_t> cold_map;
     };
 } // namespace Swelter
-
-Buenas, perdón por haberme demorado en la entrega de el borrador, he pensado en integrar las pruebas contra Entt como parte de los objetivos/resumen, pero si veis que no encaja del todo se puede quitar.
-
-Título del trabajo
-Diseño y desarrollo de un motor ECS con arquetipos y multihilo en C++
-
-Resumen
-
-Este trabajo aborda el diseño e implementación de un ECS (Entity Component System) orientado a datos en C++23, pensado para aplicaciones que gestionan un gran número de entidades que se recorren de forma continua, como los videojuegos.
-
-El objetivo principal es construir, de forma incremental y medida, un ECS basado en arquetipos, amigable con la caché y paralelo, partiendo de una implementación básica cuyos cuellos de botella se analizan frente a EnTT, una librería de referencia en la industria.
-
-El proyecto pretende cuantificar por separado el aporte del diseño (almacenamiento por arquetipos en bloques contiguos, consultas con caché y cambios estructurales diferidos) y el del paralelismo (job system propio), mediante benchmarks reproducibles.
-
-El resultado final consistirá en una librería ECS funcional y documentada, los resultados de la evaluación comparativa y una memoria que recogerá el análisis, las decisiones de diseño y su justificación frente a las alternativas.
-
-
-
-Objetivos concretos
-
-Análisis de un ECS básico de referencia frente a EnTT
-Diseño e implementación de un ECS de arquetipos (chunks, queries y command buffers)
-Diseño e implementación de un job system y ejecución paralela de sistemas
-Evaluación comparativa del rendimiento y documentación de las decisiones de diseño
-
