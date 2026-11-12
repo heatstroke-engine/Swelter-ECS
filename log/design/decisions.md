@@ -39,6 +39,7 @@ Formato de cada decisión:
 | D-09 | Cambios estructurales diferidos: command buffers explícitos | 2 | Aceptada |
 | D-10 | Paralelismo: job system y planificación de sistemas | 3 | Abierta |
 | D-11 | IDs de entidad y tabla de ubicaciones paginada | 2 | Aceptada |
+| D-12 | Errores: sin excepciones, aserciones en debug y `noexcept` solo donde aporta | 2 | Aceptada |
 
 ---
 
@@ -111,6 +112,10 @@ Cada firma registrada guarda las entidades que la cumplen y se actualiza tras ca
   - La búsqueda de lista a arquetipo solo ocurre en el camino frío (combinaciones nuevas); iterar y acceder a componentes no la usa. La estructura de búsqueda se elegirá midiendo.
   - Como los IDs son un contador (pequeños y densos), el bitset es compacto.
   - Los arquetipos se guardan en un vector y se referencian por índice (`ArchetypeId`).
+- **Implementación (2026-11-13, #16):**
+  - **Camino frío: `std::unordered_map` con el bitset como clave.** El registro limita los tipos a `MAX_COMPONENTS` (256), así que el bitset tiene ancho fijo, es único para cada conjunto de IDs y la librería estándar ya sabe hacerle hash. Evita hacer hash de la lista y compararla. Solo se usa cuando no hay arista (D-07), así que no se ha medido; si un benchmark lo pidiera, se puede cambiar sin tocar el resto.
+  - **El vector guarda `std::unique_ptr<Archetype>`**: un arquetipo no se puede copiar ni mover, y así su dirección no cambia cuando el vector crece mientras se crean arquetipos nuevos.
+  - **El arquetipo raíz** (sin componentes) se crea con el mundo y siempre tiene el ID 0. Toda entidad sale de él.
 
 ### D-05 — Almacenamiento de un arquetipo: chunks de tamaño fijo con layout SoA
 - **Estado / Fase / Fecha:** Aceptada · Fase 2 · 2026-10-21
@@ -193,6 +198,21 @@ Cada firma registrada guarda las entidades que la cumplen y se actualiza tras ca
 - **Mejoras futuras:**
   - **Transiciones por lotes:** mover muchas entidades con la misma transición buscando el destino una vez y copiando rangos de filas.
   - **Cambio de chunk entero cuando solo cambian tags:** origen y destino tienen las mismas columnas de datos, así que un chunk completo puede pasar al otro arquetipo sin copiar datos (D-06).
+- **Implementación (2026-11-13, #16):**
+  - **Mudanza (`moveEntity`):**
+    - Reserva primero la fila en el destino.
+    - Recorre las dos listas ordenadas como en un merge: mueve los comunes, destruye los que solo están en el origen y deja sin construir los que solo están en el destino, que construye quien llama.
+    - Cuando se acaba la lista del destino, su ID se sustituye por un centinela (`MAX_COMPONENTS`) mayor que cualquier ID real, así que los componentes que quedan en el origen caen en el caso "destruir" sin una rama aparte.
+  - **`removeRow` dividido en dos:** `removeRow` destruye los componentes de la fila y llama a `fillHole`, que solo tapa el hueco con la última fila. La mudanza usa `fillHole` directamente, porque los componentes de la fila ya están movidos o destruidos y destruirlos otra vez sería una doble destrucción.
+  - **Aristas de componente en los dos sentidos; aristas de bundle solo de ida.** La inversa de un bundle no es fiable: `{A} + {A,B} = {A,B}`, pero `{A,B} − {A,B} = {}`, no `{A}`. Las aristas de bundle van en listas separadas de las de componente, porque los IDs de componente y de bundle son espacios distintos con el mismo tipo base.
+  - **Registro de bundles (`BundleRegistry`):**
+    - Como el de componentes: un `static` local por combinación de tipos, que guarda los IDs ordenados la primera vez. Es el único `sort` que queda, y solo una vez por combinación.
+    - Se quitan referencias y `const` antes de llegar a la función que guarda el `static`, para que `<const A&, B>` y `<A, B>` compartan bundle.
+    - `<A,B>` y `<B,A>` sí son bundles distintos: llevan al mismo arquetipo y solo cuestan una arista más. Se prefirió a buscar la lista ordenada entre los bundles existentes.
+  - **`create`, `add` y `remove` usan siempre bundles**, también con un solo tipo, así que todos los cambios de componentes son una sola mudanza.
+  - **`add` de un componente que la entidad ya tiene:** se sobrescribe el valor sin mudanza, como el `insert` de Bevy, porque es la operación habitual de "poner este valor". Con un bundle que se solapa, los que ya tenía se asignan y los nuevos se construyen; se decide mirando el bitset del arquetipo de **origen** (el destino siempre los tiene todos). Añadir un tag que ya tiene no hace nada.
+  - **`remove` de componentes que la entidad no tiene:** se ignoran. Si no tiene ninguno, warning en debug y no hay mudanza.
+  - **Referencias invalidadas:** `add`, `remove` y `destroy` mueven filas, así que una referencia devuelta por `get` puede dejar de ser válida. Queda documentado en la API; D-09 evita el caso durante la iteración.
 
 ### D-08 — Queries: caché de arquetipos con actualización incremental
 - **Estado / Fase / Fecha:** Aceptada · Fase 2 · 2026-10-21
@@ -270,6 +290,27 @@ Cada firma registrada guarda las entidades que la cumplen y se actualiza tras ca
   - Acceder a una entidad cuesta encontrar su página y su registro, comprobar la generación e ir a la fila del chunk. Sin hash ni divisiones (salvo la de la página, que es potencia de 2: un desplazamiento de bits).
   - El swap-and-pop de D-05 y las transiciones de D-07 actualizan dos registros: el de la entidad movida y el de la que tapa el hueco.
   - **Preparado para la fase 3:** reservar un ID y materializar la entidad deben poder separarse, para que un job reserve IDs (por ejemplo, con un contador atómico al estilo de Bevy) y la entidad se cree al aplicar el command buffer. Las páginas permiten reservar sin realojar la tabla.
+
+### D-12 — Errores: sin excepciones, aserciones en debug y `noexcept` solo donde aporta
+- **Estado / Fase / Fecha:** Aceptada · Fase 2 · 2026-11-13
+- **Contexto:** al implementar el mundo (#16) aparecieron varios puntos donde algo puede fallar a mitad de una operación: superar `MAX_COMPONENTS`, agotar los índices de entidad, quedarse sin memoria al pedir un chunk o una página, o que la copia de un componente lance a mitad de `create` o `add`. Garantizar que el mundo queda en un estado coherente en todos esos casos complica el código (temporales, orden de las operaciones, deshacer a medias). Además hay que decidir qué funciones se marcan `noexcept`.
+- **Opciones:**
+  - **Excepciones con garantía fuerte:** si algo lanza, el mundo no cambia. Correcto, pero obliga a construir temporales antes de cada mudanza (un movimiento extra por componente) y a cuidar el orden de cada operación.
+  - **Excepciones con garantía básica:** sin fugas, pero el mundo puede quedar a medias. Poco útil en un juego: no hay nada razonable que hacer después.
+  - **Sin excepciones** (práctica habitual en motores de videojuegos): los errores de programación se comprueban con aserciones en debug, y los fallos irrecuperables, como quedarse sin memoria, terminan el programa.
+- **Decisión:**
+  - **Sin excepciones.** Ningún header del ECS lanza ni captura excepciones. Lo que antes era un `throw` (límite de `MAX_COMPONENTS` en el registro, índices de entidad agotados) es ahora un `debugAssertion` y una precondición documentada (`@pre ... checked only in debug`). Se puede compilar con `-fno-exceptions` (comprobado con el sandbox); activar el flag en CMake queda pendiente.
+  - **En release no se comprueba nada:** si falla, el programa termina o el comportamiento es indefinido. Superar `MAX_COMPONENTS` termina en `std::bitset::set` (la librería estándar lanza `out_of_range` y, sin manejador, el programa termina). Agotar los 2^32 índices no se comprueba, pero no es un caso realista.
+  - **`noexcept` solo donde tiene efecto o deja claro un contrato,** no en todas las funciones:
+    - `-fno-exceptions` **no** hace que las funciones sean `noexcept`. Cambia la generación de código, pero `noexcept(f())`, `std::is_nothrow_move_constructible_v` y `std::move_if_noexcept` siguen dando lo mismo.
+    - Importa en los constructores y asignaciones de movimiento, en `swap` y en los destructores: el concepto `Component` exige movimiento y destrucción `noexcept`, y `std::vector` copia en vez de mover al crecer si el movimiento no es `noexcept`.
+    - Se pone también en funciones triviales que no reservan memoria (`getColumn`, `getEntities`, `valid`, `isAlive`...).
+    - No se pone en las que reservan memoria (`create`, `add`, `addRow`...): con `-fno-exceptions` casi no mejora el código generado y solo ensucia las firmas.
+- **Consecuencias:**
+  - El código es más sencillo: no hace falta ordenar las operaciones para deshacerlas ni construir temporales antes de cada mudanza. La `tuple` de temporales de `add` deja de tener sentido y se puede quitar.
+  - Un fallo de memoria en release cierra el juego. Se acepta: en un juego no hay una recuperación razonable.
+  - Las aserciones de debug son la única red de seguridad: las pruebas del sandbox deben ejecutarse en debug.
+  - Los componentes del usuario siguen necesitando un movimiento `noexcept` para cumplir el concepto `Component`.
 
 ---
 

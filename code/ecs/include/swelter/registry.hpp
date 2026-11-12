@@ -2,14 +2,14 @@
 
 /**
  * @file registry.hpp
- * @brief Component registry: runtime IDs and type-erased component information.
+ * @brief Component and bundle registries: runtime IDs and type-erased component information.
  */
 
 #include <swelter/config.hpp>
 #include <warning.hpp>
+#include <typetraits.hpp>
 #include <type_traits>
 #include <vector>
-#include <stdexcept>
 #include <algorithm>
 #include <memory>
 #include <utility>
@@ -74,6 +74,9 @@ namespace Swelter
                         std::is_nothrow_destructible_v<T>
                     );
 
+    
+    using CmpId_t = std::uint32_t;  ///< Component ID type.
+    
     /**
      * @brief Global registry that gives each component type a runtime ID.
      *
@@ -84,7 +87,6 @@ namespace Swelter
      */
     struct CmpRegistry
     {
-        using CmpId_t = std::uint32_t;  ///< Component ID type.
 
         /**
          * @brief Returns the ID of @p T, registering it the first time.
@@ -92,7 +94,6 @@ namespace Swelter
          * cv-qualifiers and references are removed, so `T`, `const T` and `T&` share the same ID.
          * @tparam T Component type.
          * @return The ID of @p T.
-         * @throws std::length_error If registering @p T exceeds MAX_COMPONENTS.
          */
         template<typename T>
         static CmpId_t id() requires Component<std::remove_cvref_t<T>>
@@ -105,7 +106,6 @@ namespace Swelter
          *
          * Optional: it only fixes the order of the IDs.
          * @tparam Ts Component types.
-         * @throws std::length_error If registering them exceeds MAX_COMPONENTS.
          */
         template<typename... Ts>
         static void registerComponents()
@@ -161,22 +161,93 @@ namespace Swelter
              * @brief Appends a new component to the registry.
              * @param cmpinfo0 Information of the new component.
              * @return The ID given to it (its index in the registry).
-             * @throws std::length_error If the registry already has MAX_COMPONENTS types.
+             * @pre The registry has less than MAX_COMPONENTS types (checked only in debug).
              */
             static CmpId_t enlistType(ComponentInfo cmpinfo0)
             {
-                if(cmpinfo.size() + 1 <= MAX_COMPONENTS)
-                {
-                    cmpinfo.emplace_back(cmpinfo0);
-                }
-                else
-                {
-                    throw std::length_error{"Max component capacity exceeded."};
-                }
+                debugAssertion(cmpinfo.size() < MAX_COMPONENTS, "Max component capacity exceeded.");
+
+                cmpinfo.emplace_back(cmpinfo0);
 
                 return static_cast<CmpId_t>(cmpinfo.size() - 1UL);
             }
 
             inline constinit static std::vector<ComponentInfo> cmpinfo; ///< Information of each component, indexed by ID. TODO: Use mutex.
+    };
+
+    using BundleId_t = std::uint32_t;  ///< Bundle ID type.
+
+    /**
+     * @brief Global registry that gives each set of component types (a bundle) a runtime ID.
+     *
+     * A bundle is registered the first time it is used: its component IDs are computed
+     * and sorted only once, so creating or changing entities with several components
+     * doesn't need to sort them again.
+     * @note `<A,B>` and `<B,A>` are different bundles with the same IDs: both lead to the same archetype.
+     * @warning Not thread-safe: register all the bundles before starting any parallel work.
+     */
+    struct BundleRegistry
+    {
+        /**
+         * @brief Returns the ID of the bundle of @p Ts, registering it the first time.
+         *
+         * cv-qualifiers and references are removed, so `<const A&, B>` and `<A, B>` share the same ID.
+         * @tparam Ts Component types.
+         * @return The ID of the bundle.
+         * @pre No type is repeated (checked at compile time).
+         */
+        template<typename... Ts>
+        static BundleId_t id()
+        {
+            compileTimeAssertion(MP::is_unique_v<std::remove_cvref_t<Ts>...>);
+
+            return idImpl<std::remove_cvref_t<Ts>...>();
+        }
+
+        /**
+         * @brief Component IDs of a bundle.
+         * @param id ID of an already registered bundle.
+         * @return Its component IDs, sorted.
+         * @pre `id` was returned by id().
+         * @warning The reference can stop being valid when a new bundle is registered.
+         */
+        static const std::vector<CmpId_t>& ids(const BundleId_t id)
+        {
+            debugAssertion(id < bundles.size());
+
+            return bundles[id];
+        }
+        private:
+            /**
+             * @brief Appends a new bundle to the registry.
+             * @tparam Ts Component types, without cv-qualifiers or references.
+             * @return The ID given to it (its index in the registry).
+             */
+            template<typename... Ts>
+            static BundleId_t enlist()
+            {
+                std::vector<CmpId_t> bundle = { CmpRegistry::id<Ts>()... };
+                
+                std::sort(bundle.begin() ,bundle.end());
+
+                bundles.emplace_back(std::move(bundle));
+
+                return bundles.size() - static_cast<std::size_t>(1);
+            }
+
+            /**
+             * @brief Holds the ID of the bundle in a function-local static, so it is registered only once.
+             *
+             * Receives the types already cleaned by id(), so every spelling of the same
+             * types shares this one instance.
+             */
+            template<typename... Ts>
+            static BundleId_t idImpl()
+            {
+                static const BundleId_t id = enlist<Ts...>();
+
+                return id;
+            }
+            static constinit inline std::vector<std::vector<CmpId_t>> bundles{}; ///< Sorted component IDs of each bundle, indexed by ID. TODO: Use mutex.
     };
 }

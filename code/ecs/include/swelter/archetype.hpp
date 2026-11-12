@@ -20,8 +20,8 @@
 
 namespace Swelter
 {
-    using ArchetypeId_t = std::uint32_t;
-    inline constexpr ArchetypeId_t INVALID_ARCHETYPE = UINT32_MAX;
+    using ArchetypeId_t = std::uint32_t;                            ///< Archetype ID type: its index in the World.
+    inline constexpr ArchetypeId_t INVALID_ARCHETYPE = UINT32_MAX;  ///< Marks the absence of an archetype (e.g. an entity not placed yet).
 
     namespace detail
     {
@@ -99,7 +99,7 @@ namespace Swelter
      * @param ids Component IDs of the archetype.
      * @return A bitset with the bit of each ID set.
      */
-    inline std::bitset<MAX_COMPONENTS> buildBitSet(const std::vector<CmpRegistry::CmpId_t>& ids)
+    inline std::bitset<MAX_COMPONENTS> buildBitSet(const std::vector<CmpId_t>& ids)
     {
         std::bitset<MAX_COMPONENTS> bitset;
 
@@ -116,7 +116,7 @@ namespace Swelter
      * @param ids Component IDs, already registered.
      * @return Their information, in the same order as @p ids.
      */
-    inline std::vector<ComponentInfo> buildComponentInfo(const std::vector<CmpRegistry::CmpId_t>& ids)
+    inline std::vector<ComponentInfo> buildComponentInfo(const std::vector<CmpId_t>& ids)
     {
         std::vector<ComponentInfo> info;
         info.reserve(ids.size());
@@ -141,10 +141,26 @@ namespace Swelter
     };
 
 
+    /**
+     * @brief Edge of the archetype graph for one component.
+     *
+     * Says which archetype an entity goes to when component #id is added or removed.
+     */
     struct Edge
     {
-        CmpRegistry::CmpId_t id;
-        ArchetypeId_t target;
+        CmpId_t id;             ///< Component added or removed.
+        ArchetypeId_t target;   ///< Destination archetype.
+    };
+
+    /**
+     * @brief Edge of the archetype graph for a bundle of components.
+     *
+     * Kept apart from Edge because component IDs and bundle IDs are different spaces.
+     */
+    struct BundleEdge
+    {
+        BundleId_t id;          ///< Bundle added or removed.
+        ArchetypeId_t target;   ///< Destination archetype.
     };
 
     /**
@@ -177,7 +193,7 @@ namespace Swelter
          * @param ids0 Component IDs, already registered.
          * @pre @p ids0 is sorted and has no repeated IDs.
          */
-        explicit Archetype(const std::vector<CmpRegistry::CmpId_t>& ids0) :
+        explicit Archetype(const std::vector<CmpId_t>& ids0) :
             ids(ids0),
             cmps_info(buildComponentInfo(ids0)),
             layout(computeLayout(cmps_info)),
@@ -195,7 +211,7 @@ namespace Swelter
          * @param bitset0 Already computed bitset.
          * @pre @p ids0 is sorted and has no repeated IDs. @p bitset0 is the correct bitset representation of ids0.
          */
-        explicit Archetype(const std::vector<CmpRegistry::CmpId_t>& ids0, const std::bitset<MAX_COMPONENTS>& bitset0) :
+        explicit Archetype(const std::vector<CmpId_t>& ids0, const std::bitset<MAX_COMPONENTS>& bitset0) :
             ids(ids0),
             cmps_info(buildComponentInfo(ids0)),
             layout(computeLayout(cmps_info)),
@@ -249,7 +265,6 @@ namespace Swelter
          * Takes a new chunk from the pool if there are none or the last one is full.
          * @param e Entity that owns the row.
          * @return Location of the new row.
-         * @throws std::bad_alloc If a new chunk is needed and can't be allocated.
          * @warning Only the entity is written: the caller must construct every
          *          component of the row (e.g. with std::construct_at) before using it.
          */
@@ -396,10 +411,12 @@ namespace Swelter
 
         
         /**
-         * @brief Fills the hole, destroying previus last position.
+         * @brief Fills a row whose components are already destroyed or moved out, without destroying them again.
          *
          * Deletion policy b: if the row is not the last one, the last row of the last
          * chunk is moved into the hole. If the last chunk becomes empty, it goes back to the pool.
+         * Used by removeRow() after destroying the components, and when an entity moves
+         * to another archetype.
          * @param chunk_i Index of the chunk.
          * @param row Row inside that chunk.
          * @return The entity that was moved into the hole, if any. Its location must be
@@ -460,12 +477,14 @@ namespace Swelter
         Archetype& operator=(const Archetype&) = delete;
         Archetype& operator=(Archetype&&) = delete;
         // Archetype data
-        const std::vector<CmpRegistry::CmpId_t> ids;    ///< Sorted component IDs: the identity of the archetype. The position of an ID is its column index.
+        const std::vector<CmpId_t> ids;    ///< Sorted component IDs: the identity of the archetype. The position of an ID is its column index.
         const std::vector<ComponentInfo> cmps_info;     ///< Information of each component, in the same order as #ids.
         const ArchetypeLayout layout;                   ///< Capacity and column offsets of every chunk.
         const std::bitset<MAX_COMPONENTS> bitset;       ///< Same components as #ids, used to match queries with `(arch & query) == query`.
-        std::vector<Edge> add_edges;
-        std::vector<Edge> remove_edges;
+        std::vector<Edge> add_edges;                    ///< Where an entity goes when one component is added. Filled by the World.
+        std::vector<Edge> remove_edges;                 ///< Where an entity goes when one component is removed. Filled by the World.
+        std::vector<BundleEdge> bundle_add_edges;       ///< Where an entity goes when a bundle is added. Filled by the World.
+        std::vector<BundleEdge> bundle_remove_edges;    ///< Where an entity goes when a bundle is removed. Filled by the World.
         private:
             std::vector<ChunkDescriptor> chunks;        ///< Chunks in use. All are full except the last one.
     };

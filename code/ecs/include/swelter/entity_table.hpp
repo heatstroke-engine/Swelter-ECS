@@ -10,7 +10,6 @@
 #include <warning.hpp>
 #include <vector>
 #include <memory>
-#include <stdexcept>
 #include <cstdint>
 
 namespace Swelter
@@ -66,8 +65,7 @@ namespace Swelter
          *
          * Reuses the last freed index if there is one; otherwise takes a new index.
          * @return A live entity with no archetype (isPlaced() is false).
-         * @throws std::length_error If every index has been handed out.
-         * @throws std::bad_alloc If a new page is needed and can't be allocated.
+         * @pre Not every index has been handed out (checked only in debug).
          */
         Entity reserve()
         {
@@ -86,10 +84,8 @@ namespace Swelter
             }
             else
             {
-                if(next_index == UINT32_MAX)
-                {
-                    throw std::length_error{"Entity index space exhausted"};
-                }
+                debugAssertion(next_index != UINT32_MAX, "Entity index space exhausted");
+
                 std::uint32_t new_idx = next_index;
                 ensurePage(new_idx);
                 ++next_index;
@@ -224,7 +220,6 @@ namespace Swelter
 
             /**
              * @brief Allocates every missing page up to the one that holds @p index.
-             * @throws std::bad_alloc If a page can't be allocated.
              */
             void ensurePage(const std::uint32_t index)
             {

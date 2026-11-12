@@ -42,9 +42,9 @@ namespace MP
     constexpr bool is_same_v = is_same<T,U>::value;
 
     /**
-     * @brief Holds a bool value that is true when T and U are the same type.
-     * @tparam T First type to compare.
-     * @tparam U Second type to compare.
+     * @brief Holds a bool value that is true when no type appears twice in Ts.
+     * @tparam Ts Pack of types to check.
+     * @note This primary template is the base case: an empty pack is unique.
      */
     template<typename... Ts>
     struct is_unique : constant<bool, true>
@@ -52,13 +52,13 @@ namespace MP
 
     };
 
-    /// @brief Specialization for T and U being the same type.
+    /// @brief Recursive case: T is not repeated in the rest of the pack, and the rest is unique.
     template<typename T, typename... Ts>
     struct is_unique<T,Ts...> : constant<bool, ((true && ... && !is_same_v<T,Ts>) && (is_unique<Ts...>::value))>
     {
     };
 
-    /// @brief Shortcut to is_unique<T,U>::value.
+    /// @brief Shortcut to is_unique<Ts...>::value.
     template<typename... Ts>
     constexpr bool is_unique_v = is_unique<Ts...>::value;
 

@@ -4,6 +4,89 @@ Registro de progreso diario del desarrollo del ECS de arquetipos con job system 
 
 ---
 
+## 2026-11-13 (#16)
+
+**Fase:** Fase 2 - ECS de arquetipos (implementación)
+
+**Tiempo invertido:** ~1 semana (2026-11-07 a 2026-11-13)
+
+### Qué he hecho hoy
+- Implementada la #16 (mundo y grafo de arquetipos) en `world.hpp`, añadido a `swelter.hpp`:
+  - `World` con la tabla de entidades, un vector de `unique_ptr<Archetype>` y el mapa del camino frío (bitset → `ArchetypeId`). El constructor crea el arquetipo raíz (ID 0, `ROOT_ARCHETYPE`).
+  - `findOrCreateArchetype` (camino frío), `archetypeWith` y `archetypeWithout` (aristas de componente en los dos sentidos) y `archetypeWithBundle` y `archetypeWithoutBundle` (aristas de bundle, solo de ida).
+  - `create`, `destroy`, `valid`, `get` (normal y `const`) y `has`.
+  - `moveEntity`: la mudanza entre arquetipos, recorriendo las dos listas ordenadas a la vez.
+  - `add` y `remove` variádicos con bundles: una sola mudanza para varios componentes y sin arquetipos intermedios.
+- `BundleRegistry` en `registry.hpp`: un ID por combinación de tipos, con los IDs de componente ordenados una sola vez. `CmpId_t` sale de `CmpRegistry` al espacio de nombres.
+- `Archetype`: aristas (`Edge`, `BundleEdge`), constructor que recibe el bitset ya calculado y `removeRow` dividido en `removeRow` + `fillHole`.
+- Arreglos previos: `typeId` deja de ser `noexcept` y `MP::is_unique` se corrige (la recursión no comprobaba el resto del pack).
+- Quitadas las excepciones de todo el ECS: los `throw` del registro y de la tabla de entidades pasan a `debugAssertion`, y se quitan los `@throws` y los `#include <stdexcept>` (D-12). El sandbox compila y pasa con `-fno-exceptions`.
+- Doxygen de todo lo nuevo (`World` completo, bundles, aristas, `is_unique`) y corregido el de `fillHole`.
+- Pruebas en el sandbox:
+  - Grafo: camino frío, aristas de ida y vuelta, el orden de añadir no importa y los tags forman parte de la identidad.
+  - `create`: rvalues, lvalues, `const` lvalues, tags, sin componentes y orden de los argumentos.
+  - `destroy`: contador de instancias (`Tracked`), hueco tapado por la última fila, reutilización LIFO con generación y 3000 entidades en varios chunks.
+  - `add` y `remove`: valores que sobreviven a la mudanza en los dos sentidos, bajar hasta la raíz, sobrescribir sin mudanza, quitar algo que no tiene, tags, ir y volver sin crear arquetipos y 3000 entidades.
+  - Bundles: registro (ID estable, IDs ordenados, `const`/referencias), grafo (un solo salto, solapes, bundle vacío, sin arista inversa), y `create`, `add` y `remove` con varios tipos, con `Tracked` y 3000 entidades.
+
+### Decisiones de diseño
+- Las del camino frío, la mudanza, los bundles y la semántica de `add` y `remove` están en la implementación de D-04 y D-07. Las más importantes:
+  - el bitset como clave del camino frío, apoyado en `MAX_COMPONENTS` = 256;
+  - aristas de bundle solo de ida, porque la inversa no es fiable con solapes;
+  - `add` de algo que ya tiene sobrescribe sin mudanza (como el `insert` de Bevy);
+  - `remove` de algo que no tiene se ignora, con warning si no tiene ninguno.
+- Sin excepciones en el ECS, aserciones en debug y `noexcept` solo donde tiene efecto (D-12).
+- `moveEntity` reserva la fila en el destino antes de tocar el origen, y usa `fillHole` en vez de `removeRow` para no destruir dos veces.
+- Un centinela (`MAX_COMPONENTS`) cuando se acaba la lista del destino, en vez de una rama aparte para los componentes que quedan en el origen.
+- `create`, `add` y `remove` van siempre por bundles, también con un solo tipo.
+- Accesos `debug*` en el mundo (solo en debug) para probar el grafo sin hacer públicas las funciones privadas.
+
+### Problemas / bloqueos
+- No entendía bien la mudanza; tuve que repasar el recorrido en paralelo de las dos listas con un ejemplo a mano.
+- `moveEntity`:
+  - el bucle terminaba al acabarse cualquiera de las dos listas, así que los componentes que quedaban en el origen no se destruían (fuga al quitar el componente de ID más alto o al volver a la raíz);
+  - el primer arreglo leía `dst_ids.back()` con la lista vacía y fuera de rango, y se quedaba en un bucle infinito.
+- Primera versión de `add`:
+  - `construct_at` con `void*`;
+  - el ID de componente usado como índice de columna;
+  - `Component<T&>` falso con lvalues;
+  - `std::forward<U>` en vez de `std::forward<T>`;
+  - el temporal construido después de la mudanza;
+  - un `if` normal en vez de `if constexpr` con tags;
+  - añadir un tag que ya tenía acababa en una mudanza al mismo arquetipo.
+- `remove` llamaba a `archetypeWith` en vez de `archetypeWithout`.
+- Bundles:
+  - las aristas de bundle se guardaban en las listas de componente;
+  - la guarda de `archetypeWithoutBundle` miraba el bitset con un ID de bundle;
+  - la reserva restaba tamaños sin signo y se desbordaba al quitar un bundle del que solo había una parte.
+
+  Todo compilaba porque `CmpId_t` y `BundleId_t` son el mismo `uint32_t`.
+- `remove_cvref_t` dentro de `id` no evitaba bundles duplicados: el `static` estaba en `id<Ts...>`, que tiene una instancia por cada forma de escribir los tipos.
+- `add` con bundles comprobaba el bitset del destino (que siempre los tiene todos), así que asignaba sobre memoria sin construir: violación de segmento.
+- El sandbox compilaba y pasaba mientras `add` y `remove` tenían errores de compilación, porque nadie los instanciaba.
+
+### Aprendizajes
+- Una plantilla que nadie instancia no se compila del todo: hay que escribir la prueba que la usa para ver sus errores.
+- Un merge de dos listas ordenadas tiene que tratar el final de cada lista; un centinela mayor que cualquier valor lo simplifica.
+- Separar "destruir" de "tapar el hueco" evita las dobles destrucciones cuando los datos ya se han movido.
+- Con solapes, "¿lo tenía antes?" se pregunta al origen, no al destino.
+- Una variable `static` local vive en cada instancia de la plantilla: para compartirla hay que normalizar los tipos antes de llegar a la función que la tiene.
+- Dos IDs con el mismo tipo base se confunden sin que el compilador avise; un `enum class` lo evitaría.
+- Las comas de los argumentos de plantilla rompen las macros: `debugAssertion((id<A, B>() == x))`.
+- `-fno-exceptions` no hace `noexcept` a nada: `noexcept` es parte del tipo y lo consultan los traits y la librería estándar.
+- `is_trivially_copyable` implica `is_trivially_destructible`, pero no al revés.
+
+### Próximos pasos
+- PR de la #16 contra `sw/ecs/arctype/1.0`.
+- Activar `-fno-exceptions` en CMake y quitar la `tuple` de temporales de `add`.
+- Usar `is_trivially_destructible` (un campo nuevo en `ComponentInfo`) para decidir cuándo destruir.
+- Valorar `enum class` para `BundleId_t`.
+- Añadir a D-05 las alternativas descartadas (alineación a 4 KB, reserva por lotes y pool por arquetipo).
+- Arreglar el target de benchmarks, que incluye el `ecs.hpp` antiguo (#20).
+- Siguiente issue: queries (#17).
+
+---
+
 ## 2026-10-25 (#15)
 
 **Fase:** Fase 2 - ECS de arquetipos (implementación)
