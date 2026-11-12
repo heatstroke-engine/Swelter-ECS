@@ -60,7 +60,6 @@ namespace Swelter
          *
          * LIFO reuse returns the chunk most likely to still be in cache.
          * @return A non-null chunk with uninitialized data.
-         * @throws std::bad_alloc If a new chunk can't be allocated.
          */
         static Chunk* allocate()
         {
@@ -68,8 +67,7 @@ namespace Swelter
 
             if(frees.empty())
             {
-                // Reserve first: if this throws, owned is untouched and nothing leaks.
-                // Afterwards, deallocate can always push into frees without allocating.
+                // Reserve first, so deallocate can always push into frees without allocating.
                 frees.reserve(owned.size() + 1);
                 owned.emplace_back(std::make_unique_for_overwrite<Chunk>());
                 ret = owned.back().get();
