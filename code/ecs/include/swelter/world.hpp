@@ -194,6 +194,10 @@ namespace Swelter
              * entity already has: those are overwritten and the rest are constructed. If it
              * already has all of them, the entity doesn't move and only the values change.
              * Tags it already has are left as they are.
+             *
+             * Overwriting assigns the new value when the type allows it, so types like
+             * std::string can reuse their memory. Types that can't be assigned (for example,
+             * with const or reference members) are destroyed and constructed again in place.
              * @tparam Ts Component types. cv-qualifiers and references are ignored.
              * @param e Entity.
              * @param values Value of each component: rvalues are moved and lvalues are copied.
@@ -205,8 +209,6 @@ namespace Swelter
             {
                 compileTimeAssertion(MP::is_unique_v<std::remove_cvref_t<Ts>...>);
                 debugAssertion(table.isAlive(e));
-                
-                std::tuple<std::remove_cvref_t<Ts>...> tmp{std::forward<Ts>(values)...};
 
                 const EntityLocation e_loc = table.location(e);
 
@@ -225,11 +227,20 @@ namespace Swelter
                         
                         if(archetypes[src]->bitset.test(cmp_id))
                         {
-                            *p = std::move(std::get<U>(tmp));
+                            if constexpr (std::is_assignable_v<U&, Ts&&>)
+                            {
+                                *p = std::forward<Ts>(values);
+                            }
+                            else
+                            {
+                                debugAssertion(static_cast<const void*>(p) != static_cast<const void*>(std::addressof(values)));
+                                std::destroy_at(p);
+                                std::construct_at(p, std::forward<Ts>(values));
+                            }
                         }
                         else
                         {
-                            std::construct_at(p,std::move(std::get<U>(tmp)));
+                            std::construct_at(p,std::forward<Ts>(values));
                         }
                     }
                 }(), ...);

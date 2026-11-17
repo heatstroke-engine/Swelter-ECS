@@ -48,6 +48,18 @@ struct Tracked
     ~Tracked() { --alive; }
 };
 
+// Can be moved but not assigned (const member), and counts live instances like Tracked
+struct Fixed
+{
+    inline static int alive {0};
+    const int value;
+
+    explicit Fixed(int v) noexcept : value(v) { ++alive; }
+    Fixed(const Fixed& other) noexcept : value(other.value) { ++alive; }
+    Fixed(Fixed&& other) noexcept : value(other.value) { ++alive; }
+    ~Fixed() { --alive; }
+};
+
 // Long enough to skip the small string optimization, so the string really owns heap memory
 std::string longName(std::size_t i)
 {
@@ -1156,6 +1168,126 @@ void testWorldBundles()
     }
 }
 
+// World: add overwrites components that can't be assigned by rebuilding them in place
+void testWorldAddNonAssignable()
+{
+    compileTimeAssertion(Swelter::Component<Fixed>);
+    compileTimeAssertion(!std::is_copy_assignable_v<Fixed> && !std::is_move_assignable_v<Fixed>);
+
+    [[maybe_unused]] const int alive_before = Fixed::alive;
+    {
+        Swelter::World w;
+        const Swelter::Entity e = w.create(Position{1.f, 2.f}, Fixed{1});
+        debugAssertion(Fixed::alive == alive_before + 1);
+#ifdef HS_DEBUG_MODE
+        const Swelter::ArchetypeId_t arch = w.debugArchetypeOf(e);
+#endif
+
+        // rvalue: rebuilt with the new value, without moving the entity
+        w.add(e, Fixed{2});
+        debugAssertion(w.get<Fixed>(e).value == 2);
+        debugAssertion(Fixed::alive == alive_before + 1);
+#ifdef HS_DEBUG_MODE
+        debugAssertion(w.debugArchetypeOf(e) == arch);
+#endif
+
+        // lvalue: copied, the original is untouched
+        const Fixed f {3};
+        w.add(e, f);
+        debugAssertion(w.get<Fixed>(e).value == 3 && f.value == 3);
+        debugAssertion(Fixed::alive == alive_before + 2);
+
+        // Overlapping bundle: Fixed is rebuilt, Health is constructed, Position keeps its value
+        w.add(e, Fixed{4}, Health{5.f});
+        debugAssertion(w.get<Fixed>(e).value == 4 && w.get<Health>(e).h == 5.f);
+        debugAssertion(w.get<Position>(e).x == 1.f);
+        debugAssertion(Fixed::alive == alive_before + 2);
+
+        // A new Fixed in an entity without it is just constructed
+        const Swelter::Entity other = w.create(Position{});
+        w.add(other, Fixed{6});
+        debugAssertion(w.get<Fixed>(other).value == 6);
+        debugAssertion(Fixed::alive == alive_before + 3);
+
+        // Moving between archetypes still works with a non assignable type
+        w.remove<Position>(e);
+        debugAssertion(w.get<Fixed>(e).value == 4);
+        debugAssertion(Fixed::alive == alive_before + 3);
+    }
+    // The world destructor destroys the components still alive, and f is out of scope
+    debugAssertion(Fixed::alive == alive_before);
+}
+
+// MP::Filter: keeps the data terms in their order, with their cv-qualifiers, and drops With/Without
+void testFilter()
+{
+    using MP::With;
+    using MP::Without;
+    using MP::Typelist;
+    using MP::Filter_t;
+    using MP::is_same_v;
+
+    // Empty pack
+    compileTimeAssertion(is_same_v<Filter_t<>, Typelist<>>);
+
+    // Only data terms: everything is kept, in the same order
+    compileTimeAssertion(is_same_v<Filter_t<double>,             Typelist<double>>);
+    compileTimeAssertion(is_same_v<Filter_t<int, double>,        Typelist<int, double>>);
+    compileTimeAssertion(is_same_v<Filter_t<float, int, double>, Typelist<float, int, double>>);
+    compileTimeAssertion(is_same_v<Filter_t<Health, Position>,   Typelist<Health, Position>>);
+
+    // Only filters: nothing is kept
+    compileTimeAssertion(is_same_v<Filter_t<With<TPlayer>>,                     Typelist<>>);
+    compileTimeAssertion(is_same_v<Filter_t<Without<TPlayer>>,                  Typelist<>>);
+    compileTimeAssertion(is_same_v<Filter_t<With<TPlayer>, Without<Position>>,  Typelist<>>);
+
+    // Filters at the start, in the middle and at the end
+    compileTimeAssertion(is_same_v<Filter_t<With<TPlayer>, Position>,     Typelist<Position>>);
+    compileTimeAssertion(is_same_v<Filter_t<Position, Without<TPlayer>>,  Typelist<Position>>);
+    compileTimeAssertion(is_same_v<Filter_t<Position, With<TPlayer>, Health>, Typelist<Position, Health>>);
+
+    // Mixed: order and const are kept, so read and write terms can be told apart later
+    compileTimeAssertion(is_same_v<
+        Filter_t<Position, With<TPlayer>, const Health, Without<Name>>,
+        Typelist<Position, const Health>>);
+
+    // The wrapped type doesn't matter: a const one is dropped too
+    compileTimeAssertion(is_same_v<Filter_t<With<const Health>, Position>, Typelist<Position>>);
+}
+
+// MP::base_t: removes the With/Without wrapper and the cv-qualifiers and references
+void testBaseT()
+{
+    using MP::With;
+    using MP::Without;
+    using MP::base_t;
+    using MP::is_same_v;
+
+    // Plain types
+    compileTimeAssertion(is_same_v<base_t<Position>,          Position>);
+    compileTimeAssertion(is_same_v<base_t<const Position>,    Position>);
+    compileTimeAssertion(is_same_v<base_t<volatile Position>, Position>);
+    compileTimeAssertion(is_same_v<base_t<Position&>,         Position>);
+    compileTimeAssertion(is_same_v<base_t<const Position&>,   Position>);
+    compileTimeAssertion(is_same_v<base_t<Position&&>,        Position>);
+
+    // With / Without
+    compileTimeAssertion(is_same_v<base_t<With<TPlayer>>,          TPlayer>);
+    compileTimeAssertion(is_same_v<base_t<Without<TPlayer>>,       TPlayer>);
+    compileTimeAssertion(is_same_v<base_t<With<Position>>,         Position>);
+
+    // With / Without of a cv-qualified type: the wrapped type is cleaned too
+    compileTimeAssertion(is_same_v<base_t<With<const Position>>,    Position>);
+    compileTimeAssertion(is_same_v<base_t<Without<const Position>>, Position>);
+
+    // So the uniqueness check catches contradictions written with different spellings
+    compileTimeAssertion(!MP::is_unique_v<base_t<Position>, base_t<const Position>>);
+    compileTimeAssertion(!MP::is_unique_v<base_t<Position>, base_t<Without<Position>>>);
+    compileTimeAssertion(!MP::is_unique_v<base_t<Position>, base_t<With<const Position>>>);
+    compileTimeAssertion(!MP::is_unique_v<base_t<With<TPlayer>>, base_t<Without<TPlayer>>>);
+    compileTimeAssertion( MP::is_unique_v<base_t<Position>, base_t<const Health>, base_t<With<TPlayer>>>);
+}
+
 int main() {
 
     logInit();
@@ -1171,6 +1303,10 @@ int main() {
     testBundleGraph();
     testBundleRegistryCvref();
     testWorldBundles();
+    testWorldAddNonAssignable();
+
+    testFilter();
+    testBaseT();
 
     return 0;
 }

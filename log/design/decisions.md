@@ -210,7 +210,14 @@ Cada firma registrada guarda las entidades que la cumplen y se actualiza tras ca
     - Se quitan referencias y `const` antes de llegar a la función que guarda el `static`, para que `<const A&, B>` y `<A, B>` compartan bundle.
     - `<A,B>` y `<B,A>` sí son bundles distintos: llevan al mismo arquetipo y solo cuestan una arista más. Se prefirió a buscar la lista ordenada entre los bundles existentes.
   - **`create`, `add` y `remove` usan siempre bundles**, también con un solo tipo, así que todos los cambios de componentes son una sola mudanza.
-  - **`add` de un componente que la entidad ya tiene:** se sobrescribe el valor sin mudanza, como el `insert` de Bevy, porque es la operación habitual de "poner este valor". Con un bundle que se solapa, los que ya tenía se asignan y los nuevos se construyen; se decide mirando el bitset del arquetipo de **origen** (el destino siempre los tiene todos). Añadir un tag que ya tiene no hace nada.
+  - **`add` de un componente que la entidad ya tiene:** se sobrescribe el valor sin mudanza, como el `insert` de Bevy, porque es la operación habitual de "poner este valor". Con un bundle que se solapa, los que ya tenía se sobrescriben y los nuevos se construyen; se decide mirando el bitset del arquetipo de **origen** (el destino siempre los tiene todos). Añadir un tag que ya tiene no hace nada.
+  - **Cómo se sobrescribe:** se decide al compilar con `std::is_assignable_v<U&, T&&>`.
+    - **Si el tipo se puede asignar**, se asigna. Es lo más barato, porque tipos como `std::string` o `std::vector` reutilizan su memoria, y es seguro aunque el valor nuevo sea el propio componente.
+    - **Si no** (miembros `const` o referencias), se destruye y se vuelve a construir en el sitio.
+    - **Alternativas descartadas:**
+      - exigir la asignación en el concepto `Component`: limitaría al usuario sin necesidad;
+      - destruir y reconstruir siempre: un `free` y un `malloc` en cada sobrescritura de un `std::string`.
+    - **Riesgo:** con un tipo no asignable, pasar como valor nuevo una referencia al propio componente (`w.add(e, w.get<T>(e))`) lo destruiría antes de copiarlo.
   - **`remove` de componentes que la entidad no tiene:** se ignoran. Si no tiene ninguno, warning en debug y no hay mudanza.
   - **Referencias invalidadas:** `add`, `remove` y `destroy` mueven filas, así que una referencia devuelta por `get` puede dejar de ser válida. Queda documentado en la API; D-09 evita el caso durante la iteración.
 
@@ -307,7 +314,7 @@ Cada firma registrada guarda las entidades que la cumplen y se actualiza tras ca
     - Se pone también en funciones triviales que no reservan memoria (`getColumn`, `getEntities`, `valid`, `isAlive`...).
     - No se pone en las que reservan memoria (`create`, `add`, `addRow`...): con `-fno-exceptions` casi no mejora el código generado y solo ensucia las firmas.
 - **Consecuencias:**
-  - El código es más sencillo: no hace falta ordenar las operaciones para deshacerlas ni construir temporales antes de cada mudanza. La `tuple` de temporales de `add` deja de tener sentido y se puede quitar.
+  - El código es más sencillo: no hace falta ordenar las operaciones para deshacerlas ni construir temporales antes de cada mudanza. Por eso `add` construye directamente en la fila, sin una `tuple` de temporales.
   - Un fallo de memoria en release cierra el juego. Se acepta: en un juego no hay una recuperación razonable.
   - Las aserciones de debug son la única red de seguridad: las pruebas del sandbox deben ejecutarse en debug.
   - Los componentes del usuario siguen necesitando un movimiento `noexcept` para cumplir el concepto `Component`.
