@@ -31,8 +31,8 @@ namespace Swelter
     template<typename... Terms> requires (Component<MP::base_t<Terms>> && ...)
     class Query
     {
-        compileTimeAssertion(sizeof...(Terms) > 0, "Empty querys are not allowed");
-        compileTimeAssertion(MP::is_unique_v<MP::base_t<Terms>...>, "Query types must be uniques.");
+        compileTimeAssertion(sizeof...(Terms) > 0, "Empty query is not allowed");
+        compileTimeAssertion(MP::is_unique_v<MP::base_t<Terms>...>, "Query terms must be uniques.");
         compileTimeAssertion((!std::is_reference_v<Terms> && ...), "Reference is not a valid type.");
         compileTimeAssertion(( ( (MP::isWith_v<Terms> || MP::isWithout_v<Terms>) || !std::is_empty_v<MP::base_t<Terms>> ) && ... ), "Tag used as data term: use With<T>");
         public:
