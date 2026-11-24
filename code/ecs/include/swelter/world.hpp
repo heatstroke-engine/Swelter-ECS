@@ -19,6 +19,10 @@
 
 namespace Swelter
 {
+    // Forward declaration: World::query returns a Query, and Query reads the archetypes of the World (query.hpp)
+    template<typename... Terms> requires (Component<MP::base_t<Terms>> && ...)
+    class Query;
+
     /**
      * @brief Container of entities and their components.
      *
@@ -36,6 +40,8 @@ namespace Swelter
      */
     class World
     {
+        template<typename... Terms> requires (Component<MP::base_t<Terms>> && ...) friend class Query;
+
         public:
             static const ArchetypeId_t ROOT_ARCHETYPE = 0U;     ///< Archetype without components, where every entity starts.
 
@@ -275,6 +281,24 @@ namespace Swelter
                 {
                     moveEntity(e, dst);
                 }
+            }
+
+            /**
+             * @brief Creates a query over this world.
+             *
+             * Finds every archetype that already matches, so it costs O(archetypes): create the
+             * query once and keep it, instead of calling this on every run.
+             * @code
+             * auto q = world.query<Position, const Velocity, With<TPlayer>, Without<TDead>>();
+             * @endcode
+             * @tparam Ts Query terms: `T`, `const T`, `With<T>` and `Without<T>` (see Query).
+             * @return The query, by value.
+             * @note Needs query.hpp, which swelter.hpp already includes.
+             */
+            template<typename... Ts>
+            Query<Ts...> query()
+            {
+                return Query<Ts...>(*this);
             }
 
             #ifdef HS_DEBUG_MODE

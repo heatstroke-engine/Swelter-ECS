@@ -4,6 +4,66 @@ Registro de progreso diario del desarrollo del ECS de arquetipos con job system 
 
 ---
 
+## 2026-11-25 (#17)
+
+**Fase:** Fase 2 - ECS de arquetipos (implementación)
+
+**Tiempo invertido:** ~8 horas
+
+### Qué he hecho hoy
+- Terminada la #17 (queries cacheadas) en `query.hpp`:
+  - Bitsets `required`, `excluded`, `reads` y `writes`, calculados a partir de los términos, con getters de los modos de acceso para la fase 3.
+  - `World::query<Terms...>()`, que devuelve la query por valor. Resuelta la dependencia entre `world.hpp` y `query.hpp` con una declaración adelantada de `Query` y un `friend`.
+  - Caché incremental: `update()` mira solo los arquetipos nuevos desde `checked` y resuelve una vez la columna de cada término de datos, en el orden de la query.
+  - `eachChunk`: un `span` de entidades y uno por término de datos por cada chunk, construidos con `index_sequence`.
+  - `each` encima de `eachChunk`, con la entidad o sin ella, detectado al compilar.
+  - Aserciones con mensajes claros cuando la función de `each` o de `eachChunk` no encaja.
+- Pruebas en el sandbox:
+  - `testQueryTerms`, con las queries mal escritas comentadas.
+  - Modos de acceso, encaje (`With`, `Without`, raíz, sin coincidencias), columnas en el orden de la query y caché incremental.
+  - `eachChunk` y `each`: tipos de los `span` y de las referencias, filas de cada entidad, escritura y lectura, 6500 entidades en varios arquetipos y chunks, arquetipos vacíos y queries solo de filtros.
+  - Casos límite: entidades sin componentes en la raíz, `With<const T>`/`Without<const T>` y `Without` de un componente sin registrar.
+- Accesos `debug*` en `Query` para las pruebas.
+- Doxygen de `Query` y `World::query`, y la implementación en D-08.
+
+### Decisiones de diseño
+- Las de la implementación de D-08. Las más importantes:
+  - la query la guarda quien la usa;
+  - guarda un `World*` para poder asignarla;
+  - el constructor llama a `update()`;
+  - `eachChunk` tiene una sola firma, con las entidades siempre;
+  - `each` detecta si la función quiere la entidad, comprobando con referencias;
+  - una `debugAssertion` en vez de un `if` para los chunks vacíos.
+
+### Problemas / bloqueos
+- Inclusión circular entre `world.hpp` y `query.hpp`. Además, `query()` devolvía `Query<>&`: una query vacía y una referencia a un temporal.
+- Creía que había que sacar el cuerpo de `World::query` fuera de la clase. No hacía falta: es una plantilla y `Query<Ts...>` solo se comprueba al llamarla.
+- El constructor hacía el encaje pero dejaba `checked` a 0, así que `update()` habría metido los arquetipos dos veces.
+- `update()`:
+  - el bucle empezaba en 0;
+  - `CmpRegistry::id<Ts>` iba sin paréntesis;
+  - escribía en `archetypes[i]` en vez de `mach.columns[k]`, y luego en `columns[checked]`.
+- Dudaba de que tres bucles anidados y una lambda pudieran ser rápidos. Entendí que el coste lo marcan las vueltas del bucle interior y el acceso a memoria, y que la lambda se inlinea.
+- Pensaba que el `span` `const` de `getChunks` impedía escribir. El `const` es superficial: protege el puntero y `count`, no los datos.
+- `each`:
+  - `is_invocable` con valores en vez de referencias, así que la rama con entidad no se elegía nunca;
+  - para la rama sin entidad cambié `eachChunk` a dos firmas, con `(spans.size(), ...)`, que no compila con una query solo de filtros. Lo deshice y lo resolví dentro de `each`.
+
+### Aprendizajes
+- Dos packs de la misma longitud en una misma expansión se expanden a la vez: así se emparejan los tipos con sus índices (`index_sequence`).
+- El orden de evaluación de los argumentos de una función no está especificado. El de un fold con coma sí, de izquierda a derecha.
+- Las plantillas no se comprueban hasta que se usan. Hasta que no hubo una prueba que creara una query, había errores que no salían.
+- `std::is_invocable` hay que usarlo con las mismas categorías de valor que se van a pasar (referencias o valores).
+- En C++23, un `static_assert(false)` dentro de la rama descartada de un `if constexpr` solo salta si se elige esa rama.
+
+### Próximos pasos
+- Commit y PR de la #17.
+- `testQueryTerms`: escribir las queries mal formadas con `w.query<...>()`, para que solo fallen por las aserciones y no por la falta de constructor por defecto.
+- Benchmarks (#20): comparar `each` y `eachChunk` con el ECS dummy.
+- #18: command buffers y la aserción que prohíbe cambios estructurales durante la iteración.
+
+---
+
 ## 2026-11-18 (#17)
 
 **Fase:** Fase 2 - ECS de arquetipos (implementación)

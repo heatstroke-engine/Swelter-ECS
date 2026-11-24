@@ -242,6 +242,39 @@ Cada firma registrada guarda las entidades que la cumplen y se actualiza tras ca
   - En la fase 3, la actualización incremental no debe hacerse mientras otros hilos iteran la misma query: actualizar las queries antes de lanzar los jobs.
   - Dónde vive la query de cada sistema y cómo se declara se decide en la decisión de sistemas.
 - **Mejoras futuras:** índice inverso componente → arquetipos, lista separada de arquetipos vacíos, términos opcionales (`T*`) y filtro `Changed<T>` con versiones por chunk.
+- **Implementación (2026-11-25, #17):**
+  - **Términos** (`typetraits.hpp`):
+    - `With<T>` y `Without<T>` son envoltorios vacíos, reconocidos con especialización parcial (`isWith`, `isWithout`).
+    - `base_t` da el componente de un término sin envoltorio, `const` ni referencias, para poder comparar términos escritos de formas distintas.
+    - `Filter` saca los términos de datos (`T` y `const T`) en el orden en que se escriben y conservando el `const`: es la lista que decide los `span` y las columnas.
+  - **Comprobaciones al compilar**, en la propia `Query`, para que el error salga donde se escribe la query:
+    - **`Query<>` está prohibida.** No tiene un uso claro, y "todas las entidades" se puede pedir con un `Without` de algo que no se usa.
+    - **Tipos base únicos:** cubre repeticiones (`T` con `const T`) y contradicciones (`T` con `Without<T>`, `With<T>` con `Without<T>`).
+    - **Un tag como término de datos es un error**, en vez de convertirlo en `With<T>` sin avisar: un `span` de un tag no tiene sentido y así la API es explícita.
+    - **Las referencias no son términos válidos:** `T` es escritura y `const T` es lectura, sin una tercera forma.
+    - **`With<T>` con un componente que no es tag está permitido:** exige el componente sin pedir sus datos, como en Bevy.
+  - **Dónde vive la query: la guarda quien la usa.** `World::query` la devuelve por valor y cuesta O(arquetipos), así que se crea una vez y se reutiliza. Guarda un `World*` y no una referencia, para que se pueda asignar (lo necesitarán los sistemas). Su sitio definitivo se decide con los sistemas.
+  - **Caché:**
+    - un vector de `{Archetype*, columnas}` y un contador `checked` de arquetipos del mundo ya mirados;
+    - `update()` empieza en `checked`, así que sin arquetipos nuevos es una comparación;
+    - el constructor llama a `update()`, de modo que el encaje se escribe en un solo sitio;
+    - **las columnas se guardan en el orden de la query, no en el de los IDs**, y se resuelven una vez por arquetipo con `lower_bound`. Su posición en la lista ordenada es el índice de columna, porque `offsets` sigue el orden de `ids` (los tags incluidos, con tamaño 0).
+  - **Registro al crear la query:** `CmpRegistry::id` registra los componentes que nadie había usado, también los de `Without`. Se acepta: se gasta un ID y ningún arquetipo tiene ese bit.
+  - **`eachChunk` tiene una sola firma**, `f(span<const Entity>, span<T>...)`, con las entidades siempre:
+    - Los `span` se construyen expandiendo a la vez los tipos de datos y un `index_sequence`, no con un contador. Los argumentos de una función se evalúan en un orden no especificado, así que un `k++` podría cruzar las columnas.
+    - El `const` del término pasa al `span` (`span<const T>`), y así el modo de lectura se cumple al compilar.
+    - Se descartó aceptar también la firma sin entidades: dos firmas son ambiguas con lambdas genéricas y duplican la construcción de los `span`. `eachChunk` es la base de la fase 3.
+    - Los arquetipos vacíos no tienen chunks y se saltan solos. Un chunk vacío no puede existir, porque `fillHole` devuelve al pool el último chunk cuando se vacía, así que basta una `debugAssertion(count > 0)` en vez de un `if`.
+    - Si la función no encaja con la firma, hay una aserción con un mensaje que explica qué firma se espera.
+  - **`each` va encima de `eachChunk`:**
+    - Acepta `f(T&...)` y `f(Entity, T&...)` y decide al compilar con `is_invocable` sobre **referencias** (`Ts&...`, `const Entity&`). Preguntar con valores hacía que nunca se eligiera la rama con entidad cuando la función recibía referencias.
+    - Si la función se puede llamar de las dos maneras (lambda genérica variádica), gana la de la entidad.
+    - Si no encaja con ninguna, hay un error claro al compilar.
+    - Recibir un componente por valor compila pero pierde las escrituras. No se impide; queda documentado.
+  - **Rendimiento:** la anidación arquetipos → chunks → filas solo añade una vuelta barata por arquetipo y por chunk. `F` es un parámetro de plantilla, así que las lambdas se inlinean. La ventaja frente al dummy está en el acceso a memoria (columnas contiguas, sin búsquedas por entidad), no en el número de bucles: **pendiente de medir** con los benchmarks (#20).
+  - **Sin hacer en esta issue:**
+    - la prohibición de cambios estructurales durante la iteración va con D-09 (#18); `eachChunk` es el sitio del contador de iteración;
+    - el resto de las mejoras futuras.
 
 ### D-09 — Cambios estructurales diferidos: command buffers explícitos
 - **Estado / Fase / Fecha:** Aceptada · Fase 2 · 2026-10-21
