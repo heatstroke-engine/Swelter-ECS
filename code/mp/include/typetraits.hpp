@@ -2,6 +2,7 @@
 
 #include <warning.hpp>
 #include <cstdint>
+#include <type_traits>
 
 namespace MP
 {
@@ -230,6 +231,102 @@ namespace MP
     using for_all_insert_template_t = for_all_insert_template<Container, List>::type;
 
 
+    /**
+     * @brief Query term that requires component T without giving access to its data.
+     *
+     * Used for tags, and for components whose value the query doesn't need.
+     * @tparam T Component type. cv-qualifiers and references are ignored.
+     */
+    template<typename T>
+    struct With
+    {
+
+    };
+
+    /**
+     * @brief Query term that excludes the archetypes that have component T.
+     * @tparam T Component type. cv-qualifiers and references are ignored.
+     */
+    template<typename T>
+    struct Without
+    {
+
+    };
+
+
+    /**
+     * @brief Holds a bool value that is true when T is With<U> for some U.
+     * @tparam T Type to check.
+     */
+    template<typename T>
+    struct isWith : constant<bool,false>
+    {
+
+    };
+
+    /// @brief Specialization for With<T>.
+    template<typename T>
+    struct isWith<With<T>> : constant<bool,true>
+    {
+
+    };
+
+    /// @brief Shortcut to isWith<T>::value.
+    template<typename T>
+    constexpr bool isWith_v = isWith<T>::value;
+
+    /**
+     * @brief Holds a bool value that is true when T is Without<U> for some U.
+     * @tparam T Type to check.
+     */
+    template<typename T>
+    struct isWithout : constant<bool,false>
+    {
+
+    };
+
+    /// @brief Specialization for Without<T>.
+    template<typename T>
+    struct isWithout<Without<T>> : constant<bool,true>
+    {
+
+    };
+
+    /// @brief Shortcut to isWithout<T>::value.
+    template<typename T>
+    constexpr bool isWithout_v = isWithout<T>::value;
+
+    /**
+     * @brief Component type named by a query term, without the With/Without wrapper, cv-qualifiers or references.
+     *
+     * `Position`, `const Position&`, `With<const Position>` and `Without<Position>` all yield `Position`,
+     * so terms written in different ways can be compared.
+     * @tparam T Query term.
+     */
+    template<typename T>
+    struct Base : type_id<std::remove_cvref_t<T>>
+    {
+
+    };
+
+    /// @brief Specialization for With<U>: yields U without cv-qualifiers or references.
+    template<typename U>
+    struct Base<With<U>> : type_id<std::remove_cvref_t<U>>
+    {
+
+    };
+
+    /// @brief Specialization for Without<U>: yields U without cv-qualifiers or references.
+    template<typename U>
+    struct Base<Without<U>> : type_id<std::remove_cvref_t<U>>
+    {
+
+    };
+
+    /// @brief Shortcut to Base<T>::type.
+    template<typename T>
+    using base_t = Base<T>::type;
+
 
     /**
      * @brief Compile-time list of types.
@@ -352,5 +449,48 @@ namespace MP
         template<std::size_t i>
         using at = TL::template at<i>;
     };
+
+
+    /**
+     * @brief Builds a Typelist with T followed by the types of List.
+     *
+     * The types of List are unpacked, so the result is flat: `Prepend<A, Typelist<B, C>>` yields `Typelist<A, B, C>`.
+     * @tparam T    Type to put first.
+     * @tparam List Typelist with the rest of the types.
+     */
+    template <typename T, typename List>
+    struct Prepend;
+
+    /// @brief Specialization that unpacks the types of the Typelist.
+    template <typename T, typename... Ts>
+    struct Prepend<T, Typelist<Ts...>> : type_id<Typelist<T, Ts...>>
+    {
+
+    };
+
+    /**
+     * @brief Builds a Typelist with the data terms of a query: the types of Ts that are not With or Without.
+     *
+     * The kept types stay in the same order and keep their cv-qualifiers, so read (`const T`)
+     * and write (`T`) terms can still be told apart.
+     * @tparam Ts Query terms.
+     * @note This primary template is the base case: an empty pack yields an empty Typelist.
+     */
+    template <typename... Ts>
+    struct Filter : type_id<Typelist<>>
+    {
+
+    };
+
+    /// @brief Recursive case: filters the rest first, then drops T if it is With/Without or puts it in front otherwise.
+    template <typename T, typename... Ts>
+    struct Filter<T, Ts...> : IFT_t<(isWith_v<T> || isWithout_v<T>),Filter<Ts...>,Prepend<T, typename Filter<Ts...>::type>> 
+    {
+
+    };
+
+    /// @brief Shortcut to Filter<Ts...>::type.
+    template <typename... Ts>
+    using Filter_t = typename Filter<Ts...>::type;
 
 }

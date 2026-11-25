@@ -9,6 +9,7 @@
  */
 
 #include <swelter/config.hpp>
+#include <swelter/query.hpp>
 #include <swelter/entity.hpp>
 #include <swelter/registry.hpp>
 #include <swelter/chunk.hpp>

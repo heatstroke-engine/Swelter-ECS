@@ -48,6 +48,18 @@ struct Tracked
     ~Tracked() { --alive; }
 };
 
+// Can be moved but not assigned (const member), and counts live instances like Tracked
+struct Fixed
+{
+    inline static int alive {0};
+    const int value;
+
+    explicit Fixed(int v) noexcept : value(v) { ++alive; }
+    Fixed(const Fixed& other) noexcept : value(other.value) { ++alive; }
+    Fixed(Fixed&& other) noexcept : value(other.value) { ++alive; }
+    ~Fixed() { --alive; }
+};
+
 // Long enough to skip the small string optimization, so the string really owns heap memory
 std::string longName(std::size_t i)
 {
@@ -1156,6 +1168,833 @@ void testWorldBundles()
     }
 }
 
+// World: add overwrites components that can't be assigned by rebuilding them in place
+void testWorldAddNonAssignable()
+{
+    compileTimeAssertion(Swelter::Component<Fixed>);
+    compileTimeAssertion(!std::is_copy_assignable_v<Fixed> && !std::is_move_assignable_v<Fixed>);
+
+    [[maybe_unused]] const int alive_before = Fixed::alive;
+    {
+        Swelter::World w;
+        const Swelter::Entity e = w.create(Position{1.f, 2.f}, Fixed{1});
+        debugAssertion(Fixed::alive == alive_before + 1);
+#ifdef HS_DEBUG_MODE
+        const Swelter::ArchetypeId_t arch = w.debugArchetypeOf(e);
+#endif
+
+        // rvalue: rebuilt with the new value, without moving the entity
+        w.add(e, Fixed{2});
+        debugAssertion(w.get<Fixed>(e).value == 2);
+        debugAssertion(Fixed::alive == alive_before + 1);
+#ifdef HS_DEBUG_MODE
+        debugAssertion(w.debugArchetypeOf(e) == arch);
+#endif
+
+        // lvalue: copied, the original is untouched
+        const Fixed f {3};
+        w.add(e, f);
+        debugAssertion(w.get<Fixed>(e).value == 3 && f.value == 3);
+        debugAssertion(Fixed::alive == alive_before + 2);
+
+        // Overlapping bundle: Fixed is rebuilt, Health is constructed, Position keeps its value
+        w.add(e, Fixed{4}, Health{5.f});
+        debugAssertion(w.get<Fixed>(e).value == 4 && w.get<Health>(e).h == 5.f);
+        debugAssertion(w.get<Position>(e).x == 1.f);
+        debugAssertion(Fixed::alive == alive_before + 2);
+
+        // A new Fixed in an entity without it is just constructed
+        const Swelter::Entity other = w.create(Position{});
+        w.add(other, Fixed{6});
+        debugAssertion(w.get<Fixed>(other).value == 6);
+        debugAssertion(Fixed::alive == alive_before + 3);
+
+        // Moving between archetypes still works with a non assignable type
+        w.remove<Position>(e);
+        debugAssertion(w.get<Fixed>(e).value == 4);
+        debugAssertion(Fixed::alive == alive_before + 3);
+    }
+    // The world destructor destroys the components still alive, and f is out of scope
+    debugAssertion(Fixed::alive == alive_before);
+}
+
+// MP::Filter: keeps the data terms in their order, with their cv-qualifiers, and drops With/Without
+void testFilter()
+{
+    using MP::With;
+    using MP::Without;
+    using MP::Typelist;
+    using MP::Filter_t;
+    using MP::is_same_v;
+
+    // Empty pack
+    compileTimeAssertion(is_same_v<Filter_t<>, Typelist<>>);
+
+    // Only data terms: everything is kept, in the same order
+    compileTimeAssertion(is_same_v<Filter_t<double>,             Typelist<double>>);
+    compileTimeAssertion(is_same_v<Filter_t<int, double>,        Typelist<int, double>>);
+    compileTimeAssertion(is_same_v<Filter_t<float, int, double>, Typelist<float, int, double>>);
+    compileTimeAssertion(is_same_v<Filter_t<Health, Position>,   Typelist<Health, Position>>);
+
+    // Only filters: nothing is kept
+    compileTimeAssertion(is_same_v<Filter_t<With<TPlayer>>,                     Typelist<>>);
+    compileTimeAssertion(is_same_v<Filter_t<Without<TPlayer>>,                  Typelist<>>);
+    compileTimeAssertion(is_same_v<Filter_t<With<TPlayer>, Without<Position>>,  Typelist<>>);
+
+    // Filters at the start, in the middle and at the end
+    compileTimeAssertion(is_same_v<Filter_t<With<TPlayer>, Position>,     Typelist<Position>>);
+    compileTimeAssertion(is_same_v<Filter_t<Position, Without<TPlayer>>,  Typelist<Position>>);
+    compileTimeAssertion(is_same_v<Filter_t<Position, With<TPlayer>, Health>, Typelist<Position, Health>>);
+
+    // Mixed: order and const are kept, so read and write terms can be told apart later
+    compileTimeAssertion(is_same_v<
+        Filter_t<Position, With<TPlayer>, const Health, Without<Name>>,
+        Typelist<Position, const Health>>);
+
+    // The wrapped type doesn't matter: a const one is dropped too
+    compileTimeAssertion(is_same_v<Filter_t<With<const Health>, Position>, Typelist<Position>>);
+}
+
+// MP::base_t: removes the With/Without wrapper and the cv-qualifiers and references
+void testBaseT()
+{
+    using MP::With;
+    using MP::Without;
+    using MP::base_t;
+    using MP::is_same_v;
+
+    // Plain types
+    compileTimeAssertion(is_same_v<base_t<Position>,          Position>);
+    compileTimeAssertion(is_same_v<base_t<const Position>,    Position>);
+    compileTimeAssertion(is_same_v<base_t<volatile Position>, Position>);
+    compileTimeAssertion(is_same_v<base_t<Position&>,         Position>);
+    compileTimeAssertion(is_same_v<base_t<const Position&>,   Position>);
+    compileTimeAssertion(is_same_v<base_t<Position&&>,        Position>);
+
+    // With / Without
+    compileTimeAssertion(is_same_v<base_t<With<TPlayer>>,          TPlayer>);
+    compileTimeAssertion(is_same_v<base_t<Without<TPlayer>>,       TPlayer>);
+    compileTimeAssertion(is_same_v<base_t<With<Position>>,         Position>);
+
+    // With / Without of a cv-qualified type: the wrapped type is cleaned too
+    compileTimeAssertion(is_same_v<base_t<With<const Position>>,    Position>);
+    compileTimeAssertion(is_same_v<base_t<Without<const Position>>, Position>);
+
+    // So the uniqueness check catches contradictions written with different spellings
+    compileTimeAssertion(!MP::is_unique_v<base_t<Position>, base_t<const Position>>);
+    compileTimeAssertion(!MP::is_unique_v<base_t<Position>, base_t<Without<Position>>>);
+    compileTimeAssertion(!MP::is_unique_v<base_t<Position>, base_t<With<const Position>>>);
+    compileTimeAssertion(!MP::is_unique_v<base_t<With<TPlayer>>, base_t<Without<TPlayer>>>);
+    compileTimeAssertion( MP::is_unique_v<base_t<Position>, base_t<const Health>, base_t<With<TPlayer>>>);
+}
+
+#ifdef HS_DEBUG_MODE
+// Position of an archetype of the world in the cache of a query, or SIZE_MAX if the query didn't match it
+template<typename Q>
+std::size_t matchedIndex(const Q& q, const Swelter::World& w, const Swelter::ArchetypeId_t id)
+{
+    for(std::size_t i{}; i < q.debugMatchedCount(); ++i)
+    {
+        if(&q.debugMatchedArchetype(i) == &w.debugArchetype(id))
+        {
+            return i;
+        }
+    }
+    return SIZE_MAX;
+}
+#endif
+
+// Query: data terms and access modes. T is a write, const T a read, With/Without neither
+void testQueryAccessModes()
+{
+    using MP::With;
+    using MP::Without;
+    using Swelter::CmpRegistry;
+
+    Swelter::World w;
+
+    auto q = w.query<Position, const Health, With<TPlayer>, Without<Name>>();
+    compileTimeAssertion(MP::is_same_v<decltype(q)::Data_t, MP::Typelist<Position, const Health>>);
+
+    debugAssertion(q.getWrites().count() == 1 && q.getWrites().test(CmpRegistry::id<Position>()));
+    debugAssertion(q.getReads().count() == 1 && q.getReads().test(CmpRegistry::id<Health>()));
+    debugAssertion(!q.getReads().test(CmpRegistry::id<TPlayer>()) && !q.getWrites().test(CmpRegistry::id<TPlayer>()));
+    debugAssertion(!q.getReads().test(CmpRegistry::id<Name>()) && !q.getWrites().test(CmpRegistry::id<Name>()));
+
+    // Only reads
+    auto q_read = w.query<const Position, const Health>();
+    debugAssertion(q_read.getWrites().none() && q_read.getReads().count() == 2);
+
+    // Only filters: no data and no access
+    auto q_filter = w.query<With<TPlayer>, Without<Name>>();
+    compileTimeAssertion(MP::is_same_v<decltype(q_filter)::Data_t, MP::Typelist<>>);
+    debugAssertion(q_filter.getReads().none() && q_filter.getWrites().none());
+}
+
+// Query: required terms, With and Without against several archetypes
+void testQueryMatch()
+{
+#ifdef HS_DEBUG_MODE
+    using MP::With;
+    using MP::Without;
+
+    Swelter::World w;
+    const Swelter::Entity e_p   = w.create(Position{1.f, 2.f});
+    const Swelter::Entity e_ph  = w.create(Position{}, Health{});
+    const Swelter::Entity e_pht = w.create(Position{}, Health{}, TPlayer{});
+    const Swelter::Entity e_phn = w.create(Position{}, Health{}, Name{"a"});
+    const Swelter::Entity e_h   = w.create(Health{});
+
+    const Swelter::ArchetypeId_t a_p   = w.debugArchetypeOf(e_p);
+    const Swelter::ArchetypeId_t a_ph  = w.debugArchetypeOf(e_ph);
+    const Swelter::ArchetypeId_t a_pht = w.debugArchetypeOf(e_pht);
+    const Swelter::ArchetypeId_t a_phn = w.debugArchetypeOf(e_phn);
+    const Swelter::ArchetypeId_t a_h   = w.debugArchetypeOf(e_h);
+    const Swelter::ArchetypeId_t root  = Swelter::World::ROOT_ARCHETYPE;
+
+    // Root + the 5 created ones: create goes straight from the root, without intermediate archetypes
+    debugAssertion(w.debugArchetypeCount() == 6);
+
+    // One required term: every archetype with Position, even if it has more components
+    {
+        auto q = w.query<Position>();
+        debugAssertion(q.debugMatchedCount() == 4);
+        debugAssertion(matchedIndex(q, w, a_p)   != SIZE_MAX);
+        debugAssertion(matchedIndex(q, w, a_ph)  != SIZE_MAX);
+        debugAssertion(matchedIndex(q, w, a_pht) != SIZE_MAX);
+        debugAssertion(matchedIndex(q, w, a_phn) != SIZE_MAX);
+        debugAssertion(matchedIndex(q, w, a_h)   == SIZE_MAX);
+        debugAssertion(matchedIndex(q, w, root)  == SIZE_MAX);
+    }
+
+    // Several required terms
+    {
+        auto q = w.query<Position, const Health>();
+        debugAssertion(q.debugMatchedCount() == 3);
+        debugAssertion(matchedIndex(q, w, a_p) == SIZE_MAX);
+        debugAssertion(matchedIndex(q, w, a_h) == SIZE_MAX);
+    }
+
+    // With: required tag
+    {
+        auto q = w.query<Position, With<TPlayer>>();
+        debugAssertion(q.debugMatchedCount() == 1);
+        debugAssertion(matchedIndex(q, w, a_pht) == 0);
+    }
+
+    // Without: excludes the archetypes that have it
+    {
+        auto q = w.query<Position, Without<Name>>();
+        debugAssertion(q.debugMatchedCount() == 3);
+        debugAssertion(matchedIndex(q, w, a_phn) == SIZE_MAX);
+    }
+
+    // Everything at once
+    {
+        auto q = w.query<const Position, Health, With<TPlayer>, Without<Name>>();
+        debugAssertion(q.debugMatchedCount() == 1);
+        debugAssertion(matchedIndex(q, w, a_pht) == 0);
+    }
+
+    // With of a component that is not a tag: required without data
+    {
+        auto q = w.query<With<Position>, Health>();
+        debugAssertion(q.debugMatchedCount() == 3);
+        debugAssertion(matchedIndex(q, w, a_h) == SIZE_MAX);
+    }
+
+    // Only Without: the root matches too
+    {
+        auto q = w.query<Without<Name>>();
+        debugAssertion(q.debugMatchedCount() == 5);
+        debugAssertion(matchedIndex(q, w, root)  != SIZE_MAX);
+        debugAssertion(matchedIndex(q, w, a_phn) == SIZE_MAX);
+    }
+
+    // No archetype matches
+    {
+        auto q = w.query<Position, With<Name>, Without<Health>>();
+        debugAssertion(q.debugMatchedCount() == 0);
+    }
+#endif
+}
+
+// Query: each data term gets its own column, in the order of the query and not of the IDs
+void testQueryColumns()
+{
+#ifdef HS_DEBUG_MODE
+    using MP::With;
+
+    Swelter::World w;
+    const Swelter::Entity e0 = w.create(Position{1.f, 2.f}, Health{3.f}, Name{"x"}, TPlayer{});
+    const Swelter::Entity e1 = w.create(Position{4.f, 5.f}, Health{6.f}, Name{"y"}, TPlayer{});
+    const Swelter::ArchetypeId_t id = w.debugArchetypeOf(e0);
+    const Swelter::Archetype& arch = w.debugArchetype(id);
+
+    auto q_hp = w.query<Health, Position>();
+    auto q_ph = w.query<Position, Health>();
+    const std::size_t i_hp = matchedIndex(q_hp, w, id);
+    const std::size_t i_ph = matchedIndex(q_ph, w, id);
+    debugAssertion(i_hp != SIZE_MAX && i_ph != SIZE_MAX);
+
+    // The same two columns, in opposite order: one of the two queries is in the reverse order of the IDs
+    debugAssertion(q_hp.debugColumn(i_hp, 0) == q_ph.debugColumn(i_ph, 1));
+    debugAssertion(q_hp.debugColumn(i_hp, 1) == q_ph.debugColumn(i_ph, 0));
+    debugAssertion(q_hp.debugColumn(i_hp, 0) != q_hp.debugColumn(i_hp, 1));
+
+    // The columns point to the right data: row 0 is e0 and row 1 is e1
+    {
+        const auto* hp = static_cast<const Health*>(arch.getColumn(0, q_hp.debugColumn(i_hp, 0)));
+        const auto* pos = static_cast<const Position*>(arch.getColumn(0, q_hp.debugColumn(i_hp, 1)));
+        debugAssertion(hp == &w.get<Health>(e0) && pos == &w.get<Position>(e0));
+        debugAssertion(hp[1].h == 6.f && pos[1].x == 4.f && pos[1].y == 5.f);
+        debugAssertion(&hp[1] == &w.get<Health>(e1));
+    }
+
+    // Tags in the middle don't take a slot: Name is term 0 and Health is term 1
+    {
+        auto q = w.query<Name, With<TPlayer>, const Health>();
+        const std::size_t i = matchedIndex(q, w, id);
+        debugAssertion(i != SIZE_MAX);
+
+        const auto* name = static_cast<const Name*>(arch.getColumn(0, q.debugColumn(i, 0)));
+        const auto* hp = static_cast<const Health*>(arch.getColumn(0, q.debugColumn(i, 1)));
+        debugAssertion(name == &w.get<Name>(e0) && name[1].s == "y");
+        debugAssertion(hp == &w.get<Health>(e0));
+    }
+
+    // The same query in another archetype resolves other columns
+    {
+        const Swelter::Entity e2 = w.create(Health{7.f}, Position{8.f, 9.f});
+        auto q = w.query<Health, Position>();
+        const Swelter::ArchetypeId_t id2 = w.debugArchetypeOf(e2);
+        const Swelter::Archetype& arch2 = w.debugArchetype(id2);
+        const std::size_t i = matchedIndex(q, w, id2);
+        debugAssertion(i != SIZE_MAX && q.debugMatchedCount() == 2);
+
+        const auto* hp = static_cast<const Health*>(arch2.getColumn(0, q.debugColumn(i, 0)));
+        const auto* pos = static_cast<const Position*>(arch2.getColumn(0, q.debugColumn(i, 1)));
+        debugAssertion(hp == &w.get<Health>(e2) && hp->h == 7.f);
+        debugAssertion(pos == &w.get<Position>(e2) && pos->x == 8.f);
+    }
+#endif
+}
+
+// Query: the cache only looks at the archetypes created since the last update
+void testQueryIncremental()
+{
+#ifdef HS_DEBUG_MODE
+    using MP::With;
+
+    Swelter::World w;
+
+    // Created before any archetype that matches
+    auto q = w.query<Position, With<TPlayer>>();
+    debugAssertion(q.debugMatchedCount() == 0);
+
+    // A new matching archetype is not seen until the next update
+    const Swelter::Entity a = w.create(Position{}, TPlayer{});
+    debugAssertion(q.debugMatchedCount() == 0);
+    q.debugUpdate();
+    debugAssertion(q.debugMatchedCount() == 1);
+    debugAssertion(matchedIndex(q, w, w.debugArchetypeOf(a)) == 0);
+
+    // Updating again without new archetypes adds nothing
+    q.debugUpdate();
+    debugAssertion(q.debugMatchedCount() == 1);
+
+    // A new archetype that doesn't match
+    w.create(Position{});
+    q.debugUpdate();
+    debugAssertion(q.debugMatchedCount() == 1);
+
+    // A second matching one is added after the first
+    const Swelter::Entity b = w.create(Position{}, Health{}, TPlayer{});
+    q.debugUpdate();
+    debugAssertion(q.debugMatchedCount() == 2);
+    debugAssertion(matchedIndex(q, w, w.debugArchetypeOf(b)) == 1);
+
+    // More entities in archetypes that already exist: nothing new
+    w.create(Position{}, TPlayer{});
+    w.add(a, Health{});
+    debugAssertion(w.debugArchetypeOf(a) == w.debugArchetypeOf(b));
+    q.debugUpdate();
+    debugAssertion(q.debugMatchedCount() == 2);
+
+    // Archetypes created by add and remove are found too
+    w.add(a, Name{"n"});
+    q.debugUpdate();
+    debugAssertion(q.debugMatchedCount() == 3);
+    debugAssertion(matchedIndex(q, w, w.debugArchetypeOf(a)) == 2);
+
+    w.remove<TPlayer>(a);
+    q.debugUpdate();
+    debugAssertion(q.debugMatchedCount() == 3);
+
+    // Archetypes are never deleted: the cache keeps them even when they are empty
+    w.destroy(a);
+    w.destroy(b);
+    q.debugUpdate();
+    debugAssertion(q.debugMatchedCount() == 3);
+
+    // A query created later sees every archetype at once, in the same order
+    auto q_late = w.query<Position, With<TPlayer>>();
+    debugAssertion(q_late.debugMatchedCount() == 3);
+    for(std::size_t i{}; i < 3; ++i)
+    {
+        debugAssertion(&q_late.debugMatchedArchetype(i) == &q.debugMatchedArchetype(i));
+    }
+#endif
+}
+
+// Query::eachChunk: one call per non-empty chunk, with the entities and one span per data term in the order of the query
+void testQueryEachChunk()
+{
+    using MP::With;
+    using MP::Without;
+    using Swelter::Entity;
+
+    // Basic: every entity is visited once, and the spans have the size of the chunk
+    {
+        Swelter::World w;
+        w.create(Position{}, Health{});
+        w.create(Position{}, Health{});
+        w.create(Position{}, Health{});
+
+        auto q = w.query<Position, Health>();
+        std::size_t visited {0};
+        std::size_t calls {0};
+        q.eachChunk([&](std::span<const Entity> es, [[maybe_unused]] std::span<Position> pos, [[maybe_unused]] std::span<Health> hp) {
+            debugAssertion(!es.empty() && pos.size() == es.size() && hp.size() == es.size());
+            visited += es.size();
+            ++calls;
+        });
+        debugAssertion(visited == 3 && calls == 1);
+    }
+
+    // Span types: T gives span<T>, const T gives span<const T>, and the order is the one of the query
+    {
+        Swelter::World w;
+        w.create(Position{}, Health{}, TPlayer{});
+
+        auto q = w.query<const Health, With<TPlayer>, Position>();
+        std::size_t calls {0};
+        q.eachChunk([&](auto es, auto hp, auto pos) {
+            compileTimeAssertion(std::is_same_v<decltype(es),  std::span<const Entity>>);
+            compileTimeAssertion(std::is_same_v<decltype(hp),  std::span<const Health>>);
+            compileTimeAssertion(std::is_same_v<decltype(pos), std::span<Position>>);
+            ++calls;
+        });
+        debugAssertion(calls == 1);
+    }
+
+    // Row i of every span belongs to entity es[i], also when the query order is the reverse of the IDs
+    {
+        Swelter::World w;
+        for(int i{}; i < 10; ++i)
+        {
+            w.create(Position{static_cast<float>(i), 0.f}, Health{static_cast<float>(100 + i)});
+        }
+
+        auto check = [&](std::span<const Entity> es, [[maybe_unused]] std::span<Health> hp, [[maybe_unused]] std::span<Position> pos) {
+            for(std::size_t i{}; i < es.size(); ++i)
+            {
+                debugAssertion(&hp[i] == &w.get<Health>(es[i]));
+                debugAssertion(&pos[i] == &w.get<Position>(es[i]));
+                debugAssertion(hp[i].h == pos[i].x + 100.f);
+            }
+        };
+        auto q_hp = w.query<Health, Position>();
+        q_hp.eachChunk(check);
+
+        auto q_ph = w.query<Position, Health>();
+        q_ph.eachChunk([&](std::span<const Entity> es, std::span<Position> pos, std::span<Health> hp) {
+            check(es, hp, pos);
+        });
+    }
+
+    // Writes through a span are seen later with get, and const terms are read correctly
+    {
+        Swelter::World w;
+        [[maybe_unused]] const Entity a = w.create(Position{1.f, 1.f}, Health{10.f});
+        [[maybe_unused]] const Entity b = w.create(Position{2.f, 2.f}, Health{20.f});
+
+        auto q = w.query<Position, const Health>();
+        q.eachChunk([](std::span<const Entity> es, std::span<Position> pos, std::span<const Health> hp) {
+            for(std::size_t i{}; i < es.size(); ++i)
+            {
+                pos[i].x += hp[i].h;
+            }
+        });
+        debugAssertion(w.get<Position>(a).x == 11.f && w.get<Position>(a).y == 1.f);
+        debugAssertion(w.get<Position>(b).x == 22.f && w.get<Health>(b).h == 20.f);
+    }
+
+    // Several archetypes and several chunks: each matching entity is visited exactly once
+    {
+        Swelter::World w;
+        constexpr std::size_t N_PH  = 3000;
+        constexpr std::size_t N_PHT = 3000;
+        constexpr std::size_t N_PHN = 500;
+        constexpr std::size_t N_P   = 1000;   // doesn't match: no Health
+
+        std::vector<Entity> matching;
+        for(std::size_t i{}; i < N_PH; ++i)  matching.push_back(w.create(Position{}, Health{1.f}));
+        for(std::size_t i{}; i < N_PHT; ++i) matching.push_back(w.create(Position{}, Health{1.f}, TPlayer{}));
+        for(std::size_t i{}; i < N_PHN; ++i) matching.push_back(w.create(Position{}, Health{1.f}, Name{"n"}));
+        for(std::size_t i{}; i < N_P; ++i)   w.create(Position{});
+
+        std::vector<int> seen;
+        std::size_t calls {0};
+        auto q = w.query<Position, const Health>();
+        q.eachChunk([&](std::span<const Entity> es, std::span<Position>, [[maybe_unused]] std::span<const Health> hp) {
+            ++calls;
+            for(std::size_t i{}; i < es.size(); ++i)
+            {
+                if(es[i].index >= seen.size()) seen.resize(es[i].index + 1, 0);
+                ++seen[es[i].index];
+                debugAssertion(hp[i].h == 1.f);
+            }
+        });
+
+        // 3000 entities don't fit in one chunk, so there are more calls than archetypes
+        debugAssertion(calls > 3);
+        for([[maybe_unused]] const Entity e : matching)
+        {
+            debugAssertion(e.index < seen.size() && seen[e.index] == 1);
+        }
+        [[maybe_unused]] std::size_t total {0};
+        for(const int s : seen) total += static_cast<std::size_t>(s);
+        debugAssertion(total == N_PH + N_PHT + N_PHN);
+
+        // With a Without, the excluded archetype is skipped
+        std::size_t visited {0};
+        auto q_without = w.query<const Position, Without<TPlayer>>();
+        q_without.eachChunk([&](std::span<const Entity> es, std::span<const Position>) { visited += es.size(); });
+        debugAssertion(visited == N_PH + N_PHN + N_P);
+    }
+
+    // Empty archetypes are skipped: no call with zero entities
+    {
+        Swelter::World w;
+        const Entity a = w.create(Position{}, Name{"a"});
+        const Entity b = w.create(Position{}, Name{"b"}, TPlayer{});
+
+        auto q = w.query<Position, With<Name>>();
+        w.destroy(a);
+        w.remove<Name>(b);
+
+        std::size_t calls {0};
+        q.eachChunk([&](std::span<const Entity>, std::span<Position>) { ++calls; });
+        debugAssertion(calls == 0);
+#ifdef HS_DEBUG_MODE
+        // The archetypes are still in the cache, they are only skipped
+        debugAssertion(q.debugMatchedCount() == 2);
+#endif
+    }
+
+    // Only filters: the function receives only the entities
+    {
+        Swelter::World w;
+        w.create(Position{}, TPlayer{});
+        w.create(Health{}, TPlayer{});
+        w.create(Position{});
+
+        auto q = w.query<With<TPlayer>>();
+        std::size_t visited {0};
+        q.eachChunk([&](std::span<const Entity> es) { visited += es.size(); });
+        debugAssertion(visited == 2);
+    }
+
+    // A query created before the entities sees them: eachChunk updates the cache first
+    {
+        Swelter::World w;
+        auto q = w.query<Position>();
+        w.create(Position{});
+        w.create(Position{}, Health{});
+
+        std::size_t visited {0};
+        q.eachChunk([&](std::span<const Entity> es, std::span<Position>) { visited += es.size(); });
+        debugAssertion(visited == 2);
+
+        // And running it again visits the same entities, not twice as many
+        visited = 0;
+        q.eachChunk([&](std::span<const Entity> es, std::span<Position>) { visited += es.size(); });
+        debugAssertion(visited == 2);
+    }
+}
+
+// Query::each: one call per entity with references to its components, with or without the entity first
+void testQueryEach()
+{
+    using MP::With;
+    using MP::Without;
+    using Swelter::Entity;
+
+    // Without entity: writes through the references are seen later with get
+    {
+        Swelter::World w;
+        [[maybe_unused]] const Entity a = w.create(Position{1.f, 1.f}, Health{10.f});
+        [[maybe_unused]] const Entity b = w.create(Position{2.f, 2.f}, Health{20.f});
+
+        auto q = w.query<Position, const Health>();
+        std::size_t calls {0};
+        q.each([&](Position& p, const Health& h) {
+            p.x += h.h;
+            ++calls;
+        });
+        debugAssertion(calls == 2);
+        debugAssertion(w.get<Position>(a).x == 11.f && w.get<Position>(a).y == 1.f);
+        debugAssertion(w.get<Position>(b).x == 22.f && w.get<Health>(b).h == 20.f);
+    }
+
+    // With entity: the references are the components of that entity, taken as Entity or const Entity&
+    {
+        Swelter::World w;
+        for(int i{}; i < 10; ++i)
+        {
+            w.create(Position{static_cast<float>(i), 0.f}, Health{static_cast<float>(100 + i)});
+        }
+
+        auto q = w.query<Position, const Health>();
+        std::size_t calls {0};
+        q.each([&]([[maybe_unused]] Entity e, [[maybe_unused]] Position& p, [[maybe_unused]] const Health& h) {
+            debugAssertion(&p == &w.get<Position>(e) && &h == &w.get<Health>(e));
+            debugAssertion(h.h == p.x + 100.f);
+            ++calls;
+        });
+        debugAssertion(calls == 10);
+
+        calls = 0;
+        q.each([&]([[maybe_unused]] const Entity& e, [[maybe_unused]] Position& p, const Health&) {
+            debugAssertion(&p == &w.get<Position>(e));
+            ++calls;
+        });
+        debugAssertion(calls == 10);
+    }
+
+    // The arguments follow the order of the query, also when it is the reverse of the IDs
+    {
+        Swelter::World w;
+        for(int i{}; i < 10; ++i)
+        {
+            w.create(Position{static_cast<float>(i), 0.f}, Health{static_cast<float>(100 + i)});
+        }
+
+        auto q_hp = w.query<Health, Position>();
+        q_hp.each([&]([[maybe_unused]] Entity e, [[maybe_unused]] Health& h, [[maybe_unused]] Position& p) {
+            debugAssertion(&h == &w.get<Health>(e) && &p == &w.get<Position>(e));
+            debugAssertion(h.h == p.x + 100.f);
+        });
+
+        auto q_ph = w.query<Position, Health>();
+        q_ph.each([&]([[maybe_unused]] Entity e, [[maybe_unused]] Position& p, [[maybe_unused]] Health& h) {
+            debugAssertion(&h == &w.get<Health>(e) && &p == &w.get<Position>(e));
+        });
+    }
+
+    // Reference types: T gives T&, const T gives const T&, and With adds no argument
+    {
+        Swelter::World w;
+        w.create(Position{}, Health{}, TPlayer{});
+
+        auto q = w.query<const Health, With<TPlayer>, Position>();
+        std::size_t calls {0};
+        q.each([&](auto& h, auto& p) {
+            compileTimeAssertion(std::is_same_v<decltype(h), const Health&>);
+            compileTimeAssertion(std::is_same_v<decltype(p), Position&>);
+            ++calls;
+        });
+        debugAssertion(calls == 1);
+
+        // Must not compile: a const term can't be taken as a non-const reference
+        // q.each([](Health&, Position&) {});
+        // Must not compile: the entity can't be taken as a non-const reference
+        // q.each([](Entity&, const Health&, Position&) {});
+    }
+
+    // Several archetypes and chunks: each matching entity once, the same entities as eachChunk
+    {
+        Swelter::World w;
+        constexpr std::size_t N_PH  = 3000;
+        constexpr std::size_t N_PHT = 3000;
+        constexpr std::size_t N_PHN = 500;
+        constexpr std::size_t N_P   = 1000;   // doesn't match: no Health
+
+        std::vector<Entity> matching;
+        for(std::size_t i{}; i < N_PH; ++i)  matching.push_back(w.create(Position{}, Health{1.f}));
+        for(std::size_t i{}; i < N_PHT; ++i) matching.push_back(w.create(Position{}, Health{1.f}, TPlayer{}));
+        for(std::size_t i{}; i < N_PHN; ++i) matching.push_back(w.create(Position{}, Health{1.f}, Name{"n"}));
+        for(std::size_t i{}; i < N_P; ++i)   w.create(Position{});
+
+        auto q = w.query<Position, const Health>();
+
+        std::vector<int> seen;
+        q.each([&](Entity e, Position&, [[maybe_unused]] const Health& h) {
+            if(e.index >= seen.size()) seen.resize(e.index + 1, 0);
+            ++seen[e.index];
+            debugAssertion(h.h == 1.f);
+        });
+        for([[maybe_unused]] const Entity e : matching)
+        {
+            debugAssertion(e.index < seen.size() && seen[e.index] == 1);
+        }
+
+        // Same count as eachChunk and as each without entity
+        std::size_t by_each {0};
+        std::size_t by_chunk {0};
+        q.each([&](Position&, const Health&) { ++by_each; });
+        q.eachChunk([&](std::span<const Entity> es, std::span<Position>, std::span<const Health>) { by_chunk += es.size(); });
+        debugAssertion(by_each == N_PH + N_PHT + N_PHN && by_chunk == by_each);
+
+        // With a Without
+        std::size_t visited {0};
+        auto q_without = w.query<const Position, Without<TPlayer>>();
+        q_without.each([&](const Position&) { ++visited; });
+        debugAssertion(visited == N_PH + N_PHN + N_P);
+    }
+
+    // Only filters: the function takes only the entity, or nothing
+    {
+        Swelter::World w;
+        [[maybe_unused]] const Entity a = w.create(Position{}, TPlayer{});
+        [[maybe_unused]] const Entity b = w.create(Health{}, TPlayer{});
+        w.create(Position{});
+
+        auto q = w.query<With<TPlayer>>();
+        std::size_t with_entity {0};
+        q.each([&]([[maybe_unused]] Entity e) {
+            debugAssertion(e == a || e == b);
+            ++with_entity;
+        });
+        debugAssertion(with_entity == 2);
+
+        std::size_t without_entity {0};
+        q.each([&]() { ++without_entity; });
+        debugAssertion(without_entity == 2);
+    }
+
+    // Empty archetypes are skipped, and a query created before the entities sees them
+    {
+        Swelter::World w;
+        auto q = w.query<Position>();
+
+        const Entity a = w.create(Position{}, Name{"a"});
+        w.create(Position{});
+        w.destroy(a);
+
+        std::size_t calls {0};
+        q.each([&](Position&) { ++calls; });
+        debugAssertion(calls == 1);
+    }
+
+    
+}
+
+void testQueryTerms()
+{
+    Swelter::World w;
+    // Swelter::Query<> q(w);
+    // Swelter::Query<Position, Position> q(w); 
+    // Swelter::Query<Position, const Position> q(w);
+    // Swelter::Query<Position, MP::Without<Position>> q(w);
+    // Swelter::Query<Position&> q(w);
+    // Swelter::Query<TPlayer> q(w);
+    // Swelter::Query<NonMove> q(w);
+}
+
+// Only used by testQueryEdgeCases, so its ID is registered by the query itself
+struct NeverUsed
+{
+    int v;
+};
+
+// Query: entities without components, With/Without of const types and Without of an unregistered component
+void testQueryEdgeCases()
+{
+    using MP::With;
+    using MP::Without;
+    using Swelter::Entity;
+
+    // Entities without components live in the root, and a query with only Without visits them
+    {
+        Swelter::World w;
+        [[maybe_unused]] const Entity a = w.create();
+        [[maybe_unused]] const Entity b = w.create();
+        w.create(Name{"n"});
+        w.create(Position{});
+
+        auto q = w.query<Without<Name>>();
+        std::size_t visited {0};
+        std::size_t roots {0};
+        q.each([&](Entity e) {
+            ++visited;
+            if(e == a || e == b) ++roots;
+        });
+        // a, b and the one with Position
+        debugAssertion(visited == 3 && roots == 2);
+
+        // The root is skipped once it is empty
+        w.destroy(a);
+        w.destroy(b);
+        visited = 0;
+        q.each([&](Entity) { ++visited; });
+        debugAssertion(visited == 1);
+    }
+
+    // With<const T> and Without<const T> match the same archetypes as With<T> and Without<T>
+    {
+        Swelter::World w;
+        w.create(Position{}, TPlayer{});
+        w.create(Position{}, Health{});
+        w.create(Position{});
+
+        [[maybe_unused]] auto count = [](auto& q) {
+            std::size_t n {0};
+            q.each([&](const Position&) { ++n; });
+            return n;
+        };
+
+        auto q_with       = w.query<const Position, With<TPlayer>>();
+        auto q_with_c     = w.query<const Position, With<const TPlayer>>();
+        auto q_without    = w.query<const Position, Without<Health>>();
+        auto q_without_c  = w.query<const Position, Without<const Health>>();
+        debugAssertion(count(q_with) == 1 && count(q_with_c) == 1);
+        debugAssertion(count(q_without) == 2 && count(q_without_c) == 2);
+#ifdef HS_DEBUG_MODE
+        debugAssertion(q_with.debugMatchedCount() == q_with_c.debugMatchedCount());
+        debugAssertion(q_without.debugMatchedCount() == q_without_c.debugMatchedCount());
+#endif
+    }
+
+    // Without of a component nobody has used: the query registers it and matches everything else
+    {
+        Swelter::World w;
+        w.create(Position{});
+        w.create(Position{}, Health{});
+
+        [[maybe_unused]] const std::size_t registered = Swelter::CmpRegistry::count();
+        auto q = w.query<Position, Without<NeverUsed>>();
+        debugAssertion(Swelter::CmpRegistry::count() == registered + 1);
+
+        std::size_t visited {0};
+        q.each([&](Position&) { ++visited; });
+        debugAssertion(visited == 2);
+
+        // And an entity that does have it is excluded from then on
+        w.create(Position{}, NeverUsed{1});
+        visited = 0;
+        q.each([&](Position&) { ++visited; });
+        debugAssertion(visited == 2);
+
+        // A query that requires it only sees that one
+        auto q_req = w.query<const NeverUsed>();
+        std::size_t req {0};
+        q_req.each([&]([[maybe_unused]] const NeverUsed& n) { debugAssertion(n.v == 1); ++req; });
+        debugAssertion(req == 1);
+    }
+}
+
 int main() {
 
     logInit();
@@ -1171,6 +2010,18 @@ int main() {
     testBundleGraph();
     testBundleRegistryCvref();
     testWorldBundles();
+    testWorldAddNonAssignable();
+
+    testFilter();
+    testBaseT();
+    testQueryAccessModes();
+    testQueryMatch();
+    testQueryColumns();
+    testQueryIncremental();
+    testQueryEachChunk();
+    testQueryEach();
+    testQueryTerms();
+    testQueryEdgeCases();
 
     return 0;
 }
